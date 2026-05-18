@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
 
 	"grove/internal/core"
 
@@ -161,6 +163,9 @@ func (s *SQLite) DeleteSource(ctx context.Context, name string) (int, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM doc_links WHERE from_doc IN (SELECT id FROM documents WHERE source = ?)`, name); err != nil {
 		return 0, err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fts_documents WHERE doc_id IN (SELECT id FROM documents WHERE source = ?)`, name); err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE source = ?`, name)
 	if err != nil {
 		return 0, err
@@ -208,15 +213,6 @@ func (s *SQLite) ListCollections(ctx context.Context, source string) ([]core.Col
 	return out, rows.Err()
 }
 
-// payloadPath returns the sharded on-disk path for a content-addressed payload.
-// Example: hash "ab3f..." → <root>/ab/ab3f.../doc.json
-func payloadPath(root, hash, filename string) string {
-	if len(hash) < 2 {
-		return filepath.Join(root, hash, filename)
-	}
-	return filepath.Join(root, hash[:2], hash, filename)
-}
-
 const upsertDocSQL = `
 	INSERT INTO documents (id, source, collection, source_ref, title, hash, modified, metadata_json, indexed_at)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -250,8 +246,26 @@ func replaceDocLinks(ctx context.Context, tx *sql.Tx, d core.Document) error {
 	return nil
 }
 
+const (
+	deleteDocFTSSQL = `DELETE FROM fts_documents WHERE doc_id = ?`
+	insertDocFTSSQL = `INSERT INTO fts_documents (doc_id, source, title, content) VALUES (?, ?, ?, ?)`
+)
+
+// replaceDocFTS rewrites the fts_documents row for d: delete-then-insert, so a
+// re-ingested doc is reindexed and never accumulates stale rows. The caller
+// owns tx, so the document row and its FTS index entry commit atomically.
+func replaceDocFTS(ctx context.Context, tx *sql.Tx, d core.Document) error {
+	if _, err := tx.ExecContext(ctx, deleteDocFTSSQL, d.ID); err != nil {
+		return fmt.Errorf("document %s: clear fts_documents: %w", d.ID, err)
+	}
+	if _, err := tx.ExecContext(ctx, insertDocFTSSQL, d.ID, d.Source, d.Title, d.Content); err != nil {
+		return fmt.Errorf("document %s: index fts_documents: %w", d.ID, err)
+	}
+	return nil
+}
+
 func (s *SQLite) writeDocPayload(d core.Document) error {
-	payload := payloadPath(s.layout.Docs, d.Hash, "doc.json")
+	payload := core.PayloadPath(s.layout.Docs, d.Hash, "doc.json")
 	if err := os.MkdirAll(filepath.Dir(payload), 0o755); err != nil {
 		return err
 	}
@@ -292,6 +306,9 @@ func (s *SQLite) UpsertDocument(ctx context.Context, d core.Document) error {
 	if err := replaceDocLinks(ctx, tx, d); err != nil {
 		return err
 	}
+	if err := replaceDocFTS(ctx, tx, d); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -328,26 +345,196 @@ func (s *SQLite) UpsertDocuments(ctx context.Context, docs []core.Document) erro
 		if err := replaceDocLinks(ctx, tx, d); err != nil {
 			return err
 		}
+		if err := replaceDocFTS(ctx, tx, d); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
 
-func (s *SQLite) GetDocument(ctx context.Context, id string) (*core.Document, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, source, collection, source_ref, title, hash, modified, metadata_json FROM documents WHERE id = ?`, id)
+const docScanCols = `id, source, collection, source_ref, title, hash, modified, metadata_json`
+
+// scanDocRow scans one documents-table row. It does not populate the
+// content-addressed fields (Content/Hierarchy/Links) — those live in the
+// payload; see readDocPayload.
+func scanDocRow(r rowScanner) (core.Document, error) {
 	var d core.Document
 	var modified int64
 	var metaJSON string
-	if err := row.Scan(&d.ID, &d.Source, &d.Collection, &d.SourceRef, &d.Title, &d.Hash, &modified, &metaJSON); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
+	if err := r.Scan(&d.ID, &d.Source, &d.Collection, &d.SourceRef, &d.Title, &d.Hash, &modified, &metaJSON); err != nil {
+		return core.Document{}, err
 	}
 	if err := json.Unmarshal([]byte(metaJSON), &d.Metadata); err != nil {
-		return nil, fmt.Errorf("document %s: metadata unmarshal: %w", id, err)
+		return core.Document{}, fmt.Errorf("document %s: metadata unmarshal: %w", d.ID, err)
 	}
 	d.Metadata.Modified = time.Unix(modified, 0)
+	return d, nil
+}
+
+func (s *SQLite) GetDocument(ctx context.Context, id string) (*core.Document, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+docScanCols+` FROM documents WHERE id = ?`, id)
+	d, err := scanDocRow(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &d, nil
+}
+
+// ListDocumentsBySource returns every document for a source as a full
+// core.Document, including Content/Hierarchy/Links. Identity and metadata
+// come from the authoritative SQLite row; content-derived fields come from
+// the content-addressed payload, which duplicate-content docs share — so
+// payloads are read once per distinct hash.
+func (s *SQLite) ListDocumentsBySource(ctx context.Context, source string) ([]core.Document, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+docScanCols+` FROM documents WHERE source = ? ORDER BY source_ref`, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	payloads := map[string]*core.Document{}
+	var out []core.Document
+	for rows.Next() {
+		d, err := scanDocRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		p, ok := payloads[d.Hash]
+		if !ok {
+			if p, err = s.readDocPayload(d.Hash); err != nil {
+				return nil, fmt.Errorf("document %s: %w", d.ID, err)
+			}
+			payloads[d.Hash] = p
+		}
+		d.Content, d.Hierarchy, d.Links = p.Content, p.Hierarchy, p.Links
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// GetDocuments returns full core.Documents (including Content/Hierarchy/Links)
+// for the given ids, in request order. Unknown ids are skipped. Content
+// payloads are read once per distinct hash.
+func (s *SQLite) GetDocuments(ctx context.Context, ids []string) ([]core.Document, error) {
+	out := make([]core.Document, 0, len(ids))
+	payloads := map[string]*core.Document{}
+	for _, id := range ids {
+		row := s.db.QueryRowContext(ctx, `SELECT `+docScanCols+` FROM documents WHERE id = ?`, id)
+		d, err := scanDocRow(row)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		p, ok := payloads[d.Hash]
+		if !ok {
+			if p, err = s.readDocPayload(d.Hash); err != nil {
+				return nil, fmt.Errorf("document %s: %w", d.ID, err)
+			}
+			payloads[d.Hash] = p
+		}
+		d.Content, d.Hierarchy, d.Links = p.Content, p.Hierarchy, p.Links
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// FindDocuments resolves a document reference that is either a document ID or
+// a source path (source_ref). It returns every match — a bare source_ref can
+// collide across sources — ordered for stable output. Content-addressed
+// fields are not populated; this is a metadata lookup.
+func (s *SQLite) FindDocuments(ctx context.Context, ref string) ([]core.Document, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+docScanCols+` FROM documents WHERE id = ? OR source_ref = ? ORDER BY source, source_ref`,
+		ref, ref)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.Document
+	for rows.Next() {
+		d, err := scanDocRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLite) readDocPayload(hash string) (*core.Document, error) {
+	body, err := os.ReadFile(core.PayloadPath(s.layout.Docs, hash, "doc.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read doc payload: %w", err)
+	}
+	var d core.Document
+	if err := json.Unmarshal(body, &d); err != nil {
+		return nil, fmt.Errorf("doc payload unmarshal: %w", err)
+	}
+	return &d, nil
+}
+
+// ftsMatchQuery turns a free-text question into an FTS5 MATCH expression:
+// every alphanumeric run becomes a quoted term, OR-joined so any term can
+// match and bm25 ranks by overall relevance. Quoting each term neutralizes
+// FTS5 syntax characters (`?`, `"`, `*`, `-`, …) in the raw question.
+// Returns "" when the query yields no usable terms.
+func ftsMatchQuery(q string) string {
+	terms := strings.FieldsFunc(q, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	if len(terms) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(terms))
+	for i, t := range terms {
+		quoted[i] = `"` + t + `"`
+	}
+	return strings.Join(quoted, " OR ")
+}
+
+// SearchDocuments runs a full-text keyword search over document titles and
+// content, returning matching document IDs best-first. Title matches are
+// weighted above content matches. source restricts the scope when non-empty;
+// limit caps the result count (<= 0 → 12). It backs `grove ask --fast` and
+// makes no LLM call.
+func (s *SQLite) SearchDocuments(ctx context.Context, query, source string, limit int) ([]string, error) {
+	match := ftsMatchQuery(query)
+	if match == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 12
+	}
+	q := `SELECT doc_id FROM fts_documents WHERE fts_documents MATCH ?`
+	args := []any{match}
+	if source != "" {
+		q += ` AND source = ?`
+		args = append(args, source)
+	}
+	// bm25 weights, in column order: doc_id, source (both UNINDEXED, ignored),
+	// title 10×, content 1×. Lower bm25 = better, so ascending order is best-first.
+	q += ` ORDER BY bm25(fts_documents, 1.0, 1.0, 10.0, 1.0) LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("fts search %q: %w", query, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLite) CountDocuments(ctx context.Context, source string) (int, error) {

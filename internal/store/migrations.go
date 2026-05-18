@@ -98,4 +98,19 @@ var migrations = []string{
 	  status          TEXT
 	);
 	`,
+	// 0002 — full-text index backing `grove ask --fast`. Standalone FTS5
+	// table (not external-content): document content lives in the on-disk
+	// payload, not a SQLite column, so rows are written explicitly by
+	// UpsertDocument(s). doc_id/source are UNINDEXED — stored for lookup and
+	// filtering, not tokenized. Pre-0002 documents are not indexed until
+	// re-ingested (see TODO: FTS backfill).
+	`
+	CREATE VIRTUAL TABLE IF NOT EXISTS fts_documents USING fts5(
+	  doc_id UNINDEXED,
+	  source UNINDEXED,
+	  title,
+	  content,
+	  tokenize = 'porter unicode61'
+	);
+	`,
 }

@@ -3,28 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 
 	"grove/internal/core"
-	"grove/internal/store"
+	"grove/internal/grove"
 )
-
-const defaultConfigTOML = `# grove workspace configuration
-# Created by ` + "`grove init`" + `. Safe to edit.
-
-[workspace]
-schema_version = 1
-
-[build]
-# default model used by ` + "`grove build`" + ` when --model is omitted
-# model = "ollama/qwen2.5:32b"
-
-[query]
-# default model used by ` + "`grove ask`" + ` when --model is omitted
-# model = "anthropic/claude-sonnet-4-6"
-`
 
 func newInitCmd() *cobra.Command {
 	return &cobra.Command{
@@ -43,23 +27,7 @@ func newInitCmd() *cobra.Command {
 				}
 				layout = l
 			}
-			if layout.Exists() {
-				return fmt.Errorf("workspace already initialized at %s", layout.Root)
-			}
-			for _, d := range []string{layout.Root, layout.Trees, layout.Docs, layout.Auth, layout.Logs} {
-				if err := os.MkdirAll(d, 0o755); err != nil {
-					return err
-				}
-			}
-			if err := os.WriteFile(layout.ConfigTOML, []byte(defaultConfigTOML), 0o644); err != nil {
-				return err
-			}
-			s := store.New(layout)
-			if err := s.Open(ctx); err != nil {
-				return err
-			}
-			defer s.Close()
-			if err := s.Migrate(ctx); err != nil {
+			if err := grove.Init(ctx, layout); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "initialized grove workspace at %s\n", layout.Root)

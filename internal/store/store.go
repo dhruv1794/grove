@@ -29,6 +29,10 @@ type Store interface {
 	UpsertDocument(ctx context.Context, d core.Document) error
 	UpsertDocuments(ctx context.Context, docs []core.Document) error
 	GetDocument(ctx context.Context, id string) (*core.Document, error)
+	GetDocuments(ctx context.Context, ids []string) ([]core.Document, error)
+	FindDocuments(ctx context.Context, ref string) ([]core.Document, error)
+	ListDocumentsBySource(ctx context.Context, source string) ([]core.Document, error)
+	SearchDocuments(ctx context.Context, query, source string, limit int) ([]string, error)
 	CountDocuments(ctx context.Context, source string) (int, error)
 	CountDocumentsBySource(ctx context.Context) (map[string]int, error)
 

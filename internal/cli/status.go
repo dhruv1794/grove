@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"grove/internal/core"
+	"grove/internal/grove"
 )
 
 type sourceStatus struct {
@@ -30,44 +31,43 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show workspace status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			s, layout, err := openStore(ctx)
+			g, err := openGrove(ctx)
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer g.Close()
 
-			sources, err := s.ListSources(ctx)
+			rep, err := g.Status(ctx)
 			if err != nil {
 				return err
 			}
-			counts, err := s.CountDocumentsBySource(ctx)
-			if err != nil {
-				return err
-			}
-			cfg, err := core.LoadConfigFile(configPath(layout))
-			if err != nil {
-				return err
-			}
-			report := statusReport{Workspace: layout.Root, Config: cfg}
-			for _, src := range sources {
-				ss := sourceStatus{Name: src.Name, Type: string(src.Type), DocCount: counts[src.Name]}
-				if !src.LastSyncAt.IsZero() {
-					ss.LastSyncAt = src.LastSyncAt.Unix()
-				}
-				report.Sources = append(report.Sources, ss)
-			}
+			report := toStatusReport(rep)
 
 			if gflags.JSON {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
 			}
-			return renderStatusText(cmd, report, layout)
+			return renderStatusText(cmd, report)
 		},
 	}
 }
 
-func renderStatusText(cmd *cobra.Command, r statusReport, layout core.Layout) error {
+// toStatusReport maps the core-library result onto the CLI's JSON DTO,
+// which owns the wire shape (last_sync_at as a Unix timestamp).
+func toStatusReport(rep *grove.StatusReport) statusReport {
+	report := statusReport{Workspace: rep.Workspace, Config: rep.Config}
+	for _, s := range rep.Sources {
+		ss := sourceStatus{Name: s.Name, Type: s.Type, DocCount: s.DocCount}
+		if !s.LastSyncAt.IsZero() {
+			ss.LastSyncAt = s.LastSyncAt.Unix()
+		}
+		report.Sources = append(report.Sources, ss)
+	}
+	return report
+}
+
+func renderStatusText(cmd *cobra.Command, r statusReport) error {
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "workspace:   %s\n", layout.Root)
+	fmt.Fprintf(out, "workspace:   %s\n", r.Workspace)
 	fmt.Fprintf(out, "build model: %s\n", modelOrUnset(r.Config.Build.Model))
 	fmt.Fprintf(out, "query model: %s\n", modelOrUnset(r.Config.Query.Model))
 	if len(r.Sources) == 0 {

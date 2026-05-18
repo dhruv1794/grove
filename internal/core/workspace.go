@@ -46,3 +46,15 @@ func (l Layout) Exists() bool {
 	}
 	return true
 }
+
+// PayloadPath returns the sharded on-disk path for a content-addressed
+// payload under root, e.g. hash "ab3f..." → <root>/ab/ab3f.../<filename>.
+// The 2-character prefix shard keeps directory listings small. Both the
+// store (doc payloads) and the indexer (node payloads) address payloads
+// through this shared convention.
+func PayloadPath(root, hash, filename string) string {
+	if len(hash) < 2 {
+		return filepath.Join(root, hash, filename)
+	}
+	return filepath.Join(root, hash[:2], hash, filename)
+}

@@ -2,16 +2,11 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"path/filepath"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"grove/internal/connectors"
-	"grove/internal/connectors/local"
-	"grove/internal/core"
+	"grove/internal/grove"
 )
 
 func newConnectCmd() *cobra.Command {
@@ -34,65 +29,25 @@ func newConnectLocalCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			abs, err := filepath.Abs(args[0])
+			g, err := openGrove(ctx)
 			if err != nil {
 				return err
 			}
-			if name == "" {
-				name = "local-" + filepath.Base(abs)
-			}
+			defer g.Close()
 
-			s, _, err := openStore(ctx)
-			if err != nil {
-				return err
-			}
-			defer s.Close()
-
-			conn := local.New()
-			cfg := connectors.ConnectorConfig{
+			res, err := g.ConnectLocal(ctx, grove.ConnectLocalOpts{
+				Path:       args[0],
 				Name:       name,
 				Collection: collection,
 				Include:    includes,
 				Exclude:    excludes,
 				MaxSizeMB:  maxSizeMB,
-				Custom:     map[string]string{"path": abs},
-			}
-			if err := conn.Connect(ctx, cfg); err != nil {
-				return err
-			}
-
-			cfgJSON, err := json.Marshal(cfg)
+			})
 			if err != nil {
 				return err
 			}
-			src := core.Source{
-				Name:        name,
-				Type:        core.SourceLocal,
-				ConfigJSON:  string(cfgJSON),
-				ConnectedAt: time.Now(),
-			}
-			if err := s.UpsertSource(ctx, src); err != nil {
-				return err
-			}
-			if collection != "" {
-				if err := s.UpsertCollection(ctx, core.Collection{Source: name, Name: collection, Path: abs}); err != nil {
-					return err
-				}
-			}
 
-			// Drain the connector to a buffer, then upsert in one transaction.
-			batch, err := connectors.Collect(conn.Documents(ctx, connectors.StreamOpts{}))
-			if err != nil {
-				return err
-			}
-			if err := s.UpsertDocuments(ctx, batch); err != nil {
-				return err
-			}
-			if err := s.TouchSourceSync(ctx, name, time.Now()); err != nil {
-				return err
-			}
-
-			fmt.Fprintf(cmd.OutOrStdout(), "connected local source %q at %s (%d docs indexed)\n", name, abs, len(batch))
+			fmt.Fprintf(cmd.OutOrStdout(), "connected local source %q at %s (%d docs indexed)\n", res.Name, res.Path, res.DocCount)
 			return nil
 		},
 	}

@@ -14,25 +14,17 @@ func newDisconnectCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			name := args[0]
-			s, _, err := openStore(ctx)
+			g, err := openGrove(ctx)
 			if err != nil {
 				return err
 			}
-			defer s.Close()
+			defer g.Close()
 
-			src, err := s.GetSource(ctx, name)
+			res, err := g.Disconnect(ctx, args[0])
 			if err != nil {
 				return err
 			}
-			if src == nil {
-				return fmt.Errorf("no source named %q", name)
-			}
-			count, err := s.DeleteSource(ctx, name)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "disconnected source %q (%d documents removed)\n", name, count)
+			fmt.Fprintf(cmd.OutOrStdout(), "disconnected source %q (%d documents removed)\n", res.Name, res.DocsRemoved)
 			return nil
 		},
 	}

@@ -31,9 +31,9 @@ type Request struct {
 }
 
 type Usage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // Cost is the USD billed for one call. Estimated is true when the figure is
@@ -41,8 +41,8 @@ type Usage struct {
 // provider returned no token usage and the count was approximated. The CLI
 // must flag estimated costs rather than present them as exact.
 type Cost struct {
-	USD       float64
-	Estimated bool
+	USD       float64 `json:"usd"`
+	Estimated bool    `json:"estimated"`
 }
 
 type Response struct {
@@ -67,10 +67,10 @@ type LLM interface {
 // generated in one build run. Callers surface it in the CLI and persist it
 // to build_history rows.
 type Tally struct {
-	Calls     int
-	Usage     Usage
-	USD       float64
-	Estimated bool // true if any constituent call's cost was estimated
+	Calls     int     `json:"calls"`
+	Usage     Usage   `json:"usage"`
+	USD       float64 `json:"usd"`
+	Estimated bool    `json:"estimated"` // true if any constituent call's cost was estimated
 }
 
 func (t *Tally) Add(r *Response) {

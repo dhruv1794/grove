@@ -15,12 +15,13 @@ func newSourcesCmd() *cobra.Command {
 		Short: "List connected sources",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
-			s, _, err := openStore(ctx)
+			g, err := openGrove(ctx)
 			if err != nil {
 				return err
 			}
-			defer s.Close()
-			sources, err := s.ListSources(ctx)
+			defer g.Close()
+
+			sources, err := g.ListSources(ctx)
 			if err != nil {
 				return err
 			}

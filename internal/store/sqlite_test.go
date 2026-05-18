@@ -429,6 +429,104 @@ func TestDocLinksRead(t *testing.T) {
 	}
 }
 
+func TestSearchDocuments(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, name := range []string{"notes", "other"} {
+		if err := s.UpsertSource(ctx, core.Source{Name: name, Type: core.SourceLocal, ConnectedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.UpsertDocuments(ctx, []core.Document{
+		{ID: "d1", Source: "notes", SourceRef: "a.md", Title: "Login", Hash: "h1",
+			Content: "Users sign in with a password."},
+		{ID: "d2", Source: "notes", SourceRef: "b.md", Title: "Deploy", Hash: "h2",
+			Content: "The login service restarts after a deploy."},
+		{ID: "d3", Source: "other", SourceRef: "c.md", Title: "Misc", Hash: "h3",
+			Content: "An unrelated login note."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Title matches outrank content matches: d1 ("Login" in title) before d2.
+	got, err := s.SearchDocuments(ctx, "login", "", 10)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("search login: got %v, want 3 hits", got)
+	}
+	if got[0] != "d1" {
+		t.Errorf("search login best hit = %s, want d1 (title weight)", got[0])
+	}
+
+	// source filter restricts scope.
+	got, err = s.SearchDocuments(ctx, "login", "notes", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Errorf("search login source=notes: got %v, want d1,d2", got)
+	}
+
+	// limit caps the result count.
+	if got, _ = s.SearchDocuments(ctx, "login", "", 1); len(got) != 1 {
+		t.Errorf("search login limit=1: got %v, want 1", got)
+	}
+
+	// no usable terms → no results, no error.
+	if got, err = s.SearchDocuments(ctx, "  ??  ", "", 10); err != nil || got != nil {
+		t.Errorf("search punctuation-only: got %v, %v", got, err)
+	}
+
+	// DeleteSource clears the source's FTS rows.
+	if _, err := s.DeleteSource(ctx, "notes"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.SearchDocuments(ctx, "login", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "d3" {
+		t.Errorf("search login after delete: got %v, want [d3]", got)
+	}
+}
+
+func TestFindDocuments(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, name := range []string{"a", "b"} {
+		if err := s.UpsertSource(ctx, core.Source{Name: name, Type: core.SourceLocal, ConnectedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two docs in different sources share the source_ref "notes.md".
+	if err := s.UpsertDocuments(ctx, []core.Document{
+		{ID: "id-a", Source: "a", SourceRef: "notes.md", Title: "A", Hash: "h1"},
+		{ID: "id-b", Source: "b", SourceRef: "notes.md", Title: "B", Hash: "h2"},
+		{ID: "id-c", Source: "a", SourceRef: "other.md", Title: "C", Hash: "h3"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolve by document ID — exactly one match.
+	if got, err := s.FindDocuments(ctx, "id-c"); err != nil || len(got) != 1 || got[0].ID != "id-c" {
+		t.Errorf("FindDocuments(id-c) = %v, %v", got, err)
+	}
+	// Resolve by a colliding source_ref — both, ordered by source.
+	got, err := s.FindDocuments(ctx, "notes.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Source != "a" || got[1].Source != "b" {
+		t.Errorf("FindDocuments(notes.md) = %v, want id-a then id-b", got)
+	}
+	// Unknown reference — no match, no error.
+	if got, err := s.FindDocuments(ctx, "missing"); err != nil || len(got) != 0 {
+		t.Errorf("FindDocuments(missing) = %v, %v", got, err)
+	}
+}
+
 func TestCountDocumentsBySource(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()

@@ -1,0 +1,15 @@
+You are indexing a knowledge base into a tree of contents. You will be given
+the content of one node in that tree — either a single document, or a section
+that groups several subsections.
+
+Produce a concise title and a summary for the node. The summary's job is to
+help a reader decide whether the answer to some future question is likely to
+live in this part of the tree, so describe what the content is about and what
+questions it could answer — not a play-by-play of its structure.
+
+Respond with ONLY a single-line JSON object. No markdown fences, no preamble:
+{"title": "...", "summary": "..."}
+
+Rules:
+- title: under 80 characters, no trailing punctuation.
+- summary: 1 to 3 plain-text sentences. No markdown.
