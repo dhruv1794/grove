@@ -691,6 +691,34 @@ func (s *SQLite) UpsertNode(ctx context.Context, n core.Node) error {
 	return s.UpsertNodes(ctx, []core.Node{n})
 }
 
+// AddNodeSeeAlso inserts node_seealso edges grouped by source node. Unlike
+// replaceNodeEdges it does not clear existing rows or touch node_docs: the
+// cross-link pass runs after nodes are persisted, so it adds edges rather than
+// rewriting them. Re-inserting an edge updates its reason/strength in place.
+func (s *SQLite) AddNodeSeeAlso(ctx context.Context, edges map[string][]core.NodeRef) error {
+	if len(edges) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, insertNodeSeeAlsoSQL)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for from, refs := range edges {
+		for _, ref := range refs {
+			if _, err := stmt.ExecContext(ctx, from, ref.NodeID, ref.Reason, ref.Strength); err != nil {
+				return fmt.Errorf("node %s: insert node_seealso %q: %w", from, ref.NodeID, err)
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 // attachEdges populates DocIDs and SeeAlso on each node. idSubquery selects
 // the node IDs in scope and takes one bound arg, so one pair of queries
 // covers a whole tree, a content-hash group, or a single node — no N+1.

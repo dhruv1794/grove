@@ -45,6 +45,7 @@ type Store interface {
 	ListNodesByTree(ctx context.Context, treeID string) ([]core.Node, error)
 	GetNodesByContentHash(ctx context.Context, contentHash string) ([]core.Node, error)
 	DeleteNodesByTree(ctx context.Context, treeID string) (int, error)
+	AddNodeSeeAlso(ctx context.Context, edges map[string][]core.NodeRef) error
 
 	// Doc links
 	GetDocLinks(ctx context.Context, docID string) ([]core.DocLink, error)

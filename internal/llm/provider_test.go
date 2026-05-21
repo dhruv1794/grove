@@ -85,6 +85,36 @@ func TestNewUnknownProviderIsMisuse(t *testing.T) {
 	}
 }
 
+// OptionsFromEnv must read exactly the documented GROVE_* credential vars; a
+// rename of any of them would silently break credential pickup for build/ask.
+func TestOptionsFromEnv(t *testing.T) {
+	t.Setenv("GROVE_OPENAI_API_KEY", "sk-openai")
+	t.Setenv("GROVE_ANTHROPIC_API_KEY", "sk-anthropic")
+	t.Setenv("GROVE_OLLAMA_HOST", "http://box:11434")
+
+	opts := OptionsFromEnv()
+	if opts.OpenAIKey != "sk-openai" {
+		t.Errorf("OpenAIKey = %q, want sk-openai", opts.OpenAIKey)
+	}
+	if opts.AnthropicKey != "sk-anthropic" {
+		t.Errorf("AnthropicKey = %q, want sk-anthropic", opts.AnthropicKey)
+	}
+	if opts.OllamaHost != "http://box:11434" {
+		t.Errorf("OllamaHost = %q, want http://box:11434", opts.OllamaHost)
+	}
+}
+
+// Unset env vars leave the corresponding Options fields empty.
+func TestOptionsFromEnv_Unset(t *testing.T) {
+	t.Setenv("GROVE_OPENAI_API_KEY", "")
+	t.Setenv("GROVE_ANTHROPIC_API_KEY", "")
+	t.Setenv("GROVE_OLLAMA_HOST", "")
+
+	if opts := OptionsFromEnv(); opts != (Options{}) {
+		t.Errorf("OptionsFromEnv with unset env = %+v, want zero Options", opts)
+	}
+}
+
 func TestOllamaHostOverride(t *testing.T) {
 	c, err := New(ModelSpec{Provider: "ollama", Name: "x"}, Options{OllamaHost: "http://box:9999"})
 	if err != nil {

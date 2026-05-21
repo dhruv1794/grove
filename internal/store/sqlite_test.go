@@ -2,11 +2,25 @@ package store
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
 	"grove/internal/core"
 )
+
+// countDocs returns the number of documents-table rows. Test lives in package
+// store, so it can reach s.db directly.
+func countDocs(t *testing.T, s *SQLite) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM documents`).Scan(&n); err != nil {
+		t.Fatalf("count documents: %v", err)
+	}
+	return n
+}
 
 func newTestStore(t *testing.T) (*SQLite, core.Layout) {
 	t.Helper()
@@ -209,6 +223,104 @@ func TestUpsertDocument_ClearsDocLinksWhenRemoved(t *testing.T) {
 	}
 }
 
+// Re-upserting the same ID updates the row in place (ON CONFLICT(id)) rather
+// than inserting a duplicate, and the mutable fields and FTS index follow the
+// latest values.
+func TestUpsertDocument_IdempotentOnConflict(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertSource(ctx, core.Source{Name: "notes", Type: core.SourceLocal, ConnectedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	doc := core.Document{
+		ID: "d1", Source: "notes", SourceRef: "a.md", Collection: "old",
+		Title: "Original", Hash: "h1", Content: "first revision",
+	}
+	if err := s.UpsertDocument(ctx, doc); err != nil {
+		t.Fatalf("first upsert: %v", err)
+	}
+	// Re-ingest with the same ID but changed mutable fields.
+	doc.Collection = "new"
+	doc.Title = "Renamed"
+	doc.Hash = "h2"
+	doc.Content = "second revision"
+	if err := s.UpsertDocument(ctx, doc); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+
+	if n := countDocs(t, s); n != 1 {
+		t.Fatalf("documents row count = %d, want 1 (conflict updated in place)", n)
+	}
+	got, err := s.GetDocument(ctx, "d1")
+	if err != nil || got == nil {
+		t.Fatalf("GetDocument: %v", err)
+	}
+	if got.Title != "Renamed" || got.Hash != "h2" || got.Collection != "new" {
+		t.Errorf("after conflict update = %+v, want Title=Renamed Hash=h2 Collection=new", got)
+	}
+	// FTS reflects the new title; the old one no longer matches.
+	if hits, _ := s.SearchDocuments(ctx, "Renamed", "", 10); len(hits) != 1 || hits[0] != "d1" {
+		t.Errorf("FTS search 'Renamed' = %v, want [d1]", hits)
+	}
+	if hits, _ := s.SearchDocuments(ctx, "Original", "", 10); len(hits) != 0 {
+		t.Errorf("FTS search 'Original' = %v, want none after rename", hits)
+	}
+}
+
+// writeDocPayload is content-addressed and uses O_EXCL: the first writer for a
+// hash wins, and a later write for the same hash is a silent no-op. (A shared
+// hash means identical content by construction, so this is safe; it also makes
+// concurrent writers for the same hash race-free.)
+func TestWriteDocPayload_OExclPreservesFirst(t *testing.T) {
+	s, _ := newTestStore(t)
+	first := core.Document{ID: "d1", Source: "notes", SourceRef: "a.md", Hash: "shared", Content: "ORIGINAL"}
+	if err := s.writeDocPayload(first); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	// A second doc reusing the hash must not clobber the on-disk payload, and
+	// must not error despite O_EXCL.
+	second := core.Document{ID: "d2", Source: "notes", SourceRef: "b.md", Hash: "shared", Content: "DIFFERENT"}
+	if err := s.writeDocPayload(second); err != nil {
+		t.Fatalf("second write (should be a silent no-op): %v", err)
+	}
+	body, err := os.ReadFile(core.PayloadPath(s.layout.Docs, "shared", "doc.json"))
+	if err != nil {
+		t.Fatalf("read payload: %v", err)
+	}
+	var p core.Document
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.Content != "ORIGINAL" {
+		t.Errorf("payload content = %q, want ORIGINAL preserved by O_EXCL", p.Content)
+	}
+}
+
+// A failure partway through a batch must roll back the whole transaction: no
+// document from the batch is left committed. The FK on documents.source lets
+// us force the failure — the second doc names a source that doesn't exist.
+func TestUpsertDocuments_RollsBackOnMidBatchError(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertSource(ctx, core.Source{Name: "notes", Type: core.SourceLocal, ConnectedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	batch := []core.Document{
+		{ID: "ok", Source: "notes", SourceRef: "a.md", Hash: "h1"},
+		{ID: "bad", Source: "ghost", SourceRef: "b.md", Hash: "h2"}, // FK violation
+	}
+	if err := s.UpsertDocuments(ctx, batch); err == nil {
+		t.Fatal("expected FK error on mid-batch doc, got nil")
+	}
+	// The first doc, inserted earlier in the same tx, must be rolled back.
+	if n := countDocs(t, s); n != 0 {
+		t.Errorf("documents row count = %d after failed batch, want 0 (rolled back)", n)
+	}
+	if got, _ := s.GetDocument(ctx, "ok"); got != nil {
+		t.Errorf("doc 'ok' survived a rolled-back batch: %+v", got)
+	}
+}
+
 func seedTree(t *testing.T, s *SQLite, treeID string) {
 	t.Helper()
 	if err := s.UpsertTree(context.Background(), core.Tree{
@@ -340,6 +452,48 @@ func TestGetNodesByContentHash(t *testing.T) {
 	}
 	if none, _ := s.GetNodesByContentHash(ctx, "missing"); len(none) != 0 {
 		t.Errorf("unknown hash returned %d nodes", len(none))
+	}
+}
+
+// AddNodeSeeAlso adds edges without clearing a node's existing node_docs, and
+// re-adding an edge updates it in place rather than duplicating.
+func TestAddNodeSeeAlso(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	seedTree(t, s, "t1")
+	if err := s.UpsertNodes(ctx, []core.Node{
+		{ID: "n1", TreeID: "t1", Title: "N1", ContentHash: "h1", PromptVer: "p1", DocIDs: []string{"d1"}},
+		{ID: "n2", TreeID: "t1", Title: "N2", ContentHash: "h2", PromptVer: "p1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.AddNodeSeeAlso(ctx, map[string][]core.NodeRef{
+		"n1": {{NodeID: "n2", Reason: "links", Strength: 1.0}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n1, _ := s.GetNode(ctx, "n1")
+	if n1 == nil || len(n1.DocIDs) != 1 || n1.DocIDs[0] != "d1" {
+		t.Errorf("n1 DocIDs = %+v, want [d1] preserved (edges are additive)", n1)
+	}
+	if len(n1.SeeAlso) != 1 || n1.SeeAlso[0].NodeID != "n2" || n1.SeeAlso[0].Strength != 1.0 {
+		t.Errorf("n1 SeeAlso = %+v, want one edge to n2 strength 1.0", n1.SeeAlso)
+	}
+
+	// Re-adding the same (from,to) updates reason/strength, not a duplicate row.
+	if err := s.AddNodeSeeAlso(ctx, map[string][]core.NodeRef{
+		"n1": {{NodeID: "n2", Reason: "weaker", Strength: 0.5}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n1, _ = s.GetNode(ctx, "n1")
+	if len(n1.SeeAlso) != 1 || n1.SeeAlso[0].Reason != "weaker" || n1.SeeAlso[0].Strength != 0.5 {
+		t.Errorf("after re-add, n1 SeeAlso = %+v, want a single updated edge", n1.SeeAlso)
+	}
+
+	if err := s.AddNodeSeeAlso(ctx, nil); err != nil {
+		t.Errorf("empty edges should be a no-op: %v", err)
 	}
 }
 

@@ -151,6 +151,62 @@ func TestBuildNoSources(t *testing.T) {
 	}
 }
 
+func TestCrossLink(t *testing.T) {
+	ctx := context.Background()
+	s, layout := newTestStore(t)
+
+	for _, name := range []string{"notes", "other"} {
+		if err := s.UpsertSource(ctx, core.Source{Name: name, Type: core.SourceLocal}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.UpsertDocuments(ctx, []core.Document{
+		{ID: "d1", Source: "notes", SourceRef: "a.md", Title: "A", Hash: "ha", Content: "x", Links: []core.DocLink{
+			{Type: core.LinkWiki, Target: "B"},        // resolves to d2 by title (intra-tree)
+			{Type: core.LinkWiki, Target: "B"},        // duplicate → one edge
+			{Type: core.LinkURL, Target: "https://x"}, // external → skipped
+		}},
+		{ID: "d2", Source: "notes", SourceRef: "b.md", Title: "B", Hash: "hb", Content: "y", Links: []core.DocLink{
+			{Type: core.LinkDocRef, Target: "other.md"}, // resolves to d3 by source_ref (cross-tree)
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertDocuments(ctx, []core.Document{
+		{ID: "d3", Source: "other", SourceRef: "other.md", Title: "Other", Hash: "hc", Content: "z"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Build(ctx, Deps{Store: s, LLM: &fakeLLM{}, Layout: layout}, Options{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if res.CrossLinks != 2 {
+		t.Fatalf("CrossLinks = %d, want 2 (d1→d2 deduped, d2→d3)", res.CrossLinks)
+	}
+
+	seeAlso := func(treeID, leafID string) []core.NodeRef {
+		nodes, err := s.ListNodesByTree(ctx, treeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range nodes {
+			if n.ID == leafID {
+				return n.SeeAlso
+			}
+		}
+		t.Fatalf("leaf %s not found in tree %s", leafID, treeID)
+		return nil
+	}
+	if e := seeAlso("notes", "notes:doc:d1"); len(e) != 1 || e[0].NodeID != "notes:doc:d2" {
+		t.Errorf("d1 edges = %+v, want one intra-tree edge to notes:doc:d2", e)
+	}
+	if e := seeAlso("notes", "notes:doc:d2"); len(e) != 1 || e[0].NodeID != "other:doc:d3" {
+		t.Errorf("d2 edges = %+v, want one cross-tree edge to other:doc:d3", e)
+	}
+}
+
 func TestParseSummary(t *testing.T) {
 	cases := []struct{ in, title, summary string }{
 		{`{"title": "T", "summary": "S"}`, "T", "S"},

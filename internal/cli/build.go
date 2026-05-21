@@ -64,6 +64,9 @@ func renderBuildResult(cmd *cobra.Command, r *grove.BuildResult, dryRun bool) {
 	}
 	fmt.Fprintf(out, "built %s, %s (%d from cache, %d generated)\n",
 		plural(r.Trees, "tree"), plural(r.Nodes, "node"), r.CacheHits, r.CacheMiss)
+	if r.CrossLinks > 0 {
+		fmt.Fprintf(out, "links:   %s\n", plural(r.CrossLinks, "cross-link"))
+	}
 	fmt.Fprintf(out, "model:   %s\n", r.Model)
 	fmt.Fprintf(out, "llm:     %d calls · %d in / %d out tokens · %s\n",
 		r.Tally.Calls, r.Tally.Usage.PromptTokens, r.Tally.Usage.CompletionTokens, costStr(r.Tally))

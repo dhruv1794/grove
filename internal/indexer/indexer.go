@@ -44,13 +44,14 @@ type Options struct {
 
 // Result reports a completed build run.
 type Result struct {
-	Model     string    `json:"model"`
-	Trees     int       `json:"trees"`
-	Nodes     int       `json:"nodes"`
-	CacheHits int       `json:"cache_hits"`
-	CacheMiss int       `json:"cache_miss"`
-	Tally     llm.Tally `json:"tally"`
-	Elapsed   string    `json:"elapsed"`
+	Model      string    `json:"model"`
+	Trees      int       `json:"trees"`
+	Nodes      int       `json:"nodes"`
+	CacheHits  int       `json:"cache_hits"`
+	CacheMiss  int       `json:"cache_miss"`
+	CrossLinks int       `json:"cross_links"`
+	Tally      llm.Tally `json:"tally"`
+	Elapsed    string    `json:"elapsed"`
 }
 
 // Build indexes connected sources into the forest. Each source becomes one
@@ -83,15 +84,23 @@ func Build(ctx context.Context, deps Deps, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("source %s: %w", src.Name, err)
 		}
 	}
+	// Cross-link pass runs once all trees in this run are persisted, so both
+	// edge endpoints resolve to live nodes (per documents/03 §7).
+	if !opts.DryRun {
+		if err := b.crossLink(ctx); err != nil {
+			return nil, fmt.Errorf("cross-link: %w", err)
+		}
+	}
 	b.res.Elapsed = time.Since(start).Round(time.Millisecond).String()
 	return b.res, nil
 }
 
 type builder struct {
-	deps  Deps
-	opts  Options
-	model string
-	res   *Result
+	deps    Deps
+	opts    Options
+	model   string
+	res     *Result
+	allDocs []core.Document // every doc built this run; the cross-link pass resolves links over it
 }
 
 func (b *builder) buildSource(ctx context.Context, src core.Source) error {
@@ -102,6 +111,7 @@ func (b *builder) buildSource(ctx context.Context, src core.Source) error {
 	if len(docs) == 0 {
 		return nil // nothing to index for this source — not an error
 	}
+	b.allDocs = append(b.allDocs, docs...)
 
 	treeID := src.Name
 	root := assembleTree(treeID, docs)
