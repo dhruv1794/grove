@@ -913,6 +913,46 @@ func (s *SQLite) ListDocLinksBySource(ctx context.Context, source string) (map[s
 	return out, rows.Err()
 }
 
+func (s *SQLite) RecordBuild(ctx context.Context, r core.BuildRecord) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO build_history
+		   (started_at, finished_at, model, docs_processed, nodes_created, cost_usd, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		nullableUnix(r.StartedAt), nullableUnix(r.FinishedAt), r.Model,
+		r.DocsProcessed, r.NodesCreated, r.CostUSD, r.Status)
+	return err
+}
+
+// ListBuildHistory returns the most recent build runs, newest first. A limit
+// <= 0 returns all rows.
+func (s *SQLite) ListBuildHistory(ctx context.Context, limit int) ([]core.BuildRecord, error) {
+	query := `SELECT started_at, finished_at, model, docs_processed, nodes_created, cost_usd, status
+	          FROM build_history ORDER BY id DESC`
+	args := []any{}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.BuildRecord
+	for rows.Next() {
+		var r core.BuildRecord
+		var started, finished int64
+		if err := rows.Scan(&started, &finished, &r.Model,
+			&r.DocsProcessed, &r.NodesCreated, &r.CostUSD, &r.Status); err != nil {
+			return nil, err
+		}
+		r.StartedAt = toTime(started)
+		r.FinishedAt = toTime(finished)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func nullableUnix(t time.Time) any {
 	if t.IsZero() {
 		return nil

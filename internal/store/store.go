@@ -50,4 +50,8 @@ type Store interface {
 	// Doc links
 	GetDocLinks(ctx context.Context, docID string) ([]core.DocLink, error)
 	ListDocLinksBySource(ctx context.Context, source string) (map[string][]core.DocLink, error)
+
+	// Build history
+	RecordBuild(ctx context.Context, r core.BuildRecord) error
+	ListBuildHistory(ctx context.Context, limit int) ([]core.BuildRecord, error)
 }

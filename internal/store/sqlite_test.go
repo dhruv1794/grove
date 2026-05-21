@@ -321,6 +321,53 @@ func TestUpsertDocuments_RollsBackOnMidBatchError(t *testing.T) {
 	}
 }
 
+func TestRecordAndListBuildHistory(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	if got, err := s.ListBuildHistory(ctx, 0); err != nil || got != nil {
+		t.Fatalf("empty history = %v, %v, want nil/nil", got, err)
+	}
+
+	first := core.BuildRecord{
+		StartedAt: time.Unix(1000, 0), FinishedAt: time.Unix(1005, 0),
+		Model: "ollama/llama3.1:8b", DocsProcessed: 3, NodesCreated: 6, CostUSD: 0, Status: "ok",
+	}
+	second := core.BuildRecord{
+		StartedAt: time.Unix(2000, 0), FinishedAt: time.Unix(2009, 0),
+		Model: "openai/gpt-4o-mini", DocsProcessed: 10, NodesCreated: 15, CostUSD: 0.0123, Status: "ok",
+	}
+	if err := s.RecordBuild(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordBuild(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := s.ListBuildHistory(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("history len = %d, want 2", len(all))
+	}
+	// Newest first.
+	if all[0].Model != "openai/gpt-4o-mini" || all[0].CostUSD != 0.0123 || all[0].DocsProcessed != 10 {
+		t.Errorf("newest row = %+v, want the second build", all[0])
+	}
+	if !all[0].StartedAt.Equal(time.Unix(2000, 0)) || !all[0].FinishedAt.Equal(time.Unix(2009, 0)) {
+		t.Errorf("timestamps round-trip wrong: %+v", all[0])
+	}
+	if all[1].Model != "ollama/llama3.1:8b" || all[1].NodesCreated != 6 {
+		t.Errorf("oldest row = %+v, want the first build", all[1])
+	}
+
+	// limit caps the result count.
+	if got, _ := s.ListBuildHistory(ctx, 1); len(got) != 1 || got[0].Model != "openai/gpt-4o-mini" {
+		t.Errorf("limit=1 = %+v, want only the newest", got)
+	}
+}
+
 func seedTree(t *testing.T, s *SQLite, treeID string) {
 	t.Helper()
 	if err := s.UpsertTree(context.Background(), core.Tree{

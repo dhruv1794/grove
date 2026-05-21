@@ -104,6 +104,21 @@ type Tree struct {
 	PromptVer  string
 }
 
+// BuildRecord is one row of build history (the build_history table in
+// documents/03-data-model.md) — a durable, queryable log of each build run.
+type BuildRecord struct {
+	StartedAt     time.Time
+	FinishedAt    time.Time
+	Model         string
+	DocsProcessed int
+	NodesCreated  int
+	CostUSD       float64
+	Status        string // BuildStatusOK today; failure statuses when build error handling lands
+}
+
+// BuildStatusOK marks a successfully completed build run.
+const BuildStatusOK = "ok"
+
 type ChangeType string
 
 const (

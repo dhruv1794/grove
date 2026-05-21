@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"grove/internal/core"
@@ -37,9 +38,23 @@ type Deps struct {
 
 // Options tunes a build run.
 type Options struct {
-	Source  string // build only this source; "" builds every source
-	Rebuild bool   // ignore the node cache; re-call the model for every node
-	DryRun  bool   // plan and report the work; no model calls, no writes
+	Source      string // build only this source; "" builds every source
+	Rebuild     bool   // ignore the node cache; re-call the model for every node
+	DryRun      bool   // plan and report the work; no model calls, no writes
+	Concurrency int    // max in-flight model calls; <= 1 builds sequentially
+
+	// OnProgress, if set, is called as a source's nodes are processed. It is
+	// invoked serially (never concurrently), so the callback needs no locking.
+	OnProgress func(Progress)
+}
+
+// Progress reports node-build progress for one source's tree. The indexer
+// emits it through Options.OnProgress so an adapter (the CLI) can render a
+// progress bar without the indexer depending on a presentation library.
+type Progress struct {
+	Source string
+	Total  int // nodes in this source's tree
+	Done   int // nodes completed so far in this source
 }
 
 // Result reports a completed build run.
@@ -79,6 +94,9 @@ func Build(ctx context.Context, deps Deps, opts Options) (*Result, error) {
 
 	model := deps.LLM.Model().String()
 	b := &builder{deps: deps, opts: opts, model: model, res: &Result{Model: model}}
+	if opts.Concurrency > 1 {
+		b.sem = make(chan struct{}, opts.Concurrency)
+	}
 	for _, src := range sources {
 		if err := b.buildSource(ctx, src); err != nil {
 			return nil, fmt.Errorf("source %s: %w", src.Name, err)
@@ -91,7 +109,23 @@ func Build(ctx context.Context, deps Deps, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("cross-link: %w", err)
 		}
 	}
-	b.res.Elapsed = time.Since(start).Round(time.Millisecond).String()
+	finished := time.Now()
+	b.res.Elapsed = finished.Sub(start).Round(time.Millisecond).String()
+
+	// A dry run writes nothing, so it leaves no history row.
+	if !opts.DryRun {
+		if err := deps.Store.RecordBuild(ctx, core.BuildRecord{
+			StartedAt:     start,
+			FinishedAt:    finished,
+			Model:         model,
+			DocsProcessed: len(b.allDocs),
+			NodesCreated:  b.res.Nodes,
+			CostUSD:       b.res.Tally.USD,
+			Status:        core.BuildStatusOK,
+		}); err != nil {
+			return nil, fmt.Errorf("record build: %w", err)
+		}
+	}
 	return b.res, nil
 }
 
@@ -101,6 +135,14 @@ type builder struct {
 	model   string
 	res     *Result
 	allDocs []core.Document // every doc built this run; the cross-link pass resolves links over it
+
+	sem chan struct{} // bounds in-flight model calls; nil when building sequentially
+	mu  sync.Mutex    // guards res (counts + Tally) under concurrent node processing
+
+	pgMu     sync.Mutex // serializes progress updates + the OnProgress callback, separate from mu so UI rendering doesn't block the counter hot path
+	pgSource string     // source whose tree is currently being processed
+	pgTotal  int        // node count of the current source's tree
+	pgDone   int        // nodes completed in the current source
 }
 
 func (b *builder) buildSource(ctx context.Context, src core.Source) error {
@@ -111,10 +153,11 @@ func (b *builder) buildSource(ctx context.Context, src core.Source) error {
 	if len(docs) == 0 {
 		return nil // nothing to index for this source — not an error
 	}
-	b.allDocs = append(b.allDocs, docs...)
+	b.allDocs = append(b.allDocs, docs...) // unguarded: sources build sequentially in Build
 
 	treeID := src.Name
 	root := assembleTree(treeID, docs)
+	b.progressStart(src.Name, root)
 	if err := b.processNode(ctx, root); err != nil {
 		return err
 	}
@@ -150,33 +193,114 @@ func (b *builder) buildSource(ctx context.Context, src core.Source) error {
 	return b.deps.Store.UpsertNodes(ctx, nodes)
 }
 
-// processNode walks the tree post-order: it hashes each node from its
-// (already-processed) children, then fills the title/summary from the node
-// cache or a fresh model call.
+// processNode walks the tree post-order: children are processed first (a
+// node's content hash derives from theirs), then the node itself. Sibling
+// subtrees are independent, so they run concurrently when a semaphore is set;
+// the semaphore in fillNode bounds the scarce resource — in-flight model calls
+// — rather than goroutines, which would deadlock a parent waiting on children.
 func (b *builder) processNode(ctx context.Context, n *bnode) error {
-	for _, c := range n.children {
-		if err := b.processNode(ctx, c); err != nil {
-			return err
-		}
+	if err := b.processChildren(ctx, n); err != nil {
+		return err
 	}
+	if err := b.fillNode(ctx, n); err != nil {
+		return err
+	}
+	b.progressTick()
+	return nil
+}
+
+// progressStart resets the progress counters for a source's tree and emits the
+// initial (Done=0) event. It runs before any worker goroutine is spawned, so
+// the field writes are visible to later progressTick calls via that happens-
+// before edge; no lock needed here. countNodes is only walked when a progress
+// consumer is attached.
+func (b *builder) progressStart(source string, root *bnode) {
+	if b.opts.OnProgress == nil {
+		return
+	}
+	total := countNodes(root)
+	b.pgSource, b.pgTotal, b.pgDone = source, total, 0
+	b.opts.OnProgress(Progress{Source: source, Total: total, Done: 0})
+}
+
+// progressTick advances the current source's progress by one node, under pgMu
+// so OnProgress is never invoked concurrently — without blocking the counter
+// hot path (mu), which every worker takes via tally.
+func (b *builder) progressTick() {
+	if b.opts.OnProgress == nil {
+		return
+	}
+	b.pgMu.Lock()
+	defer b.pgMu.Unlock()
+	b.pgDone++
+	b.opts.OnProgress(Progress{Source: b.pgSource, Total: b.pgTotal, Done: b.pgDone})
+}
+
+// countNodes returns the number of nodes in the assembled tree rooted at n.
+func countNodes(n *bnode) int {
+	count := 1
+	for _, c := range n.children {
+		count += countNodes(c)
+	}
+	return count
+}
+
+func (b *builder) processChildren(ctx context.Context, n *bnode) error {
+	if b.sem == nil || len(n.children) <= 1 {
+		for _, c := range n.children {
+			if err := b.processNode(ctx, c); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	var once sync.Once
+	var firstErr error
+	for _, c := range n.children {
+		wg.Add(1)
+		go func(c *bnode) {
+			defer wg.Done()
+			if err := b.processNode(ctx, c); err != nil {
+				once.Do(func() { firstErr = err; cancel() })
+			}
+		}(c)
+	}
+	wg.Wait()
+	return firstErr
+}
+
+// fillNode hashes a node from its already-processed children, then fills its
+// title/summary from the node cache or a fresh model call.
+func (b *builder) fillNode(ctx context.Context, n *bnode) error {
 	n.contentHash = hashNode(n)
 	n.payloadPath = core.PayloadPath(b.deps.Layout.Trees, n.contentHash,
 		cacheFilename(prompts.Node.Ver(), b.model))
-	b.res.Nodes++
+	b.tally(func(r *Result) { r.Nodes++ })
 
 	if !b.opts.Rebuild {
 		if p, err := core.ReadNodePayload(n.payloadPath); err == nil {
 			n.title, n.summary = p.Title, p.Summary
-			b.res.CacheHits++
+			b.tally(func(r *Result) { r.CacheHits++ })
 			return nil
 		}
 	}
-	b.res.CacheMiss++
+	b.tally(func(r *Result) { r.CacheMiss++ })
 	if b.opts.DryRun {
 		n.title = b.fallbackTitle(n)
 		return nil
 	}
 
+	if b.sem != nil {
+		select {
+		case b.sem <- struct{}{}:
+			defer func() { <-b.sem }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	resp, err := b.deps.LLM.Complete(ctx, llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: prompts.Node.Template},
@@ -188,13 +312,22 @@ func (b *builder) processNode(ctx context.Context, n *bnode) error {
 	if err != nil {
 		return fmt.Errorf("summarize node %s: %w", n.id, err)
 	}
-	b.res.Tally.Add(resp)
+	b.tally(func(r *Result) { r.Tally.Add(resp) })
 	title, summary := parseSummary(resp.Content)
 	if title == "" {
 		title = b.fallbackTitle(n)
 	}
 	n.title, n.summary = title, summary
 	return b.writeNodePayload(n)
+}
+
+// tally applies a result mutation under the lock so concurrent fillNode calls
+// don't race on the shared counters. Increments are commutative, so totals are
+// independent of node-processing order.
+func (b *builder) tally(f func(*Result)) {
+	b.mu.Lock()
+	f(b.res)
+	b.mu.Unlock()
 }
 
 // nodeContent assembles the user message for a node: a leaf supplies its

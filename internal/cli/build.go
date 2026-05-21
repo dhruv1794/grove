@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"time"
 
+	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 
 	"grove/internal/grove"
@@ -14,6 +17,7 @@ import (
 func newBuildCmd() *cobra.Command {
 	var model, source string
 	var rebuild, dryRun bool
+	var concurrency int
 
 	cmd := &cobra.Command{
 		Use:   "build",
@@ -30,12 +34,16 @@ func newBuildCmd() *cobra.Command {
 			}
 			defer g.Close()
 
+			onProgress, finishProgress := newBuildProgress(dryRun)
 			res, err := g.Build(ctx, grove.BuildOpts{
-				Model:   model,
-				Source:  source,
-				Rebuild: rebuild,
-				DryRun:  dryRun,
+				Model:       model,
+				Source:      source,
+				Rebuild:     rebuild,
+				DryRun:      dryRun,
+				Concurrency: concurrency,
+				OnProgress:  onProgress,
 			})
+			finishProgress()
 			if err != nil {
 				return err
 			}
@@ -51,7 +59,44 @@ func newBuildCmd() *cobra.Command {
 	cmd.Flags().StringVar(&source, "source", "", "build only this source (default: all)")
 	cmd.Flags().BoolVar(&rebuild, "rebuild", false, "ignore the node cache; re-call the model for every node")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report the work without calling the model or writing")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 4, "max in-flight model calls (1 = sequential)")
 	return cmd
+}
+
+// newBuildProgress returns a per-source progress callback for grove build and
+// a finish func to flush the final bar. It returns a nil callback when progress
+// should be suppressed: --json (machine output), --dry-run (no real work), or a
+// non-terminal stderr (piped/redirected). A new bar is started per source.
+func newBuildProgress(dryRun bool) (func(grove.BuildProgress), func()) {
+	if gflags.JSON || dryRun || !isTerminal(os.Stderr) {
+		return nil, func() {}
+	}
+	var bar *progressbar.ProgressBar
+	var source string
+	report := func(p grove.BuildProgress) {
+		if bar == nil || p.Source != source {
+			if bar != nil {
+				bar.Finish()
+			}
+			source = p.Source
+			bar = progressbar.NewOptions(p.Total,
+				progressbar.OptionSetWriter(os.Stderr),
+				progressbar.OptionSetDescription("building "+p.Source),
+				progressbar.OptionSetPredictTime(false),
+				progressbar.OptionShowCount(),
+				progressbar.OptionClearOnFinish(),
+				// Coalesce redraws; without a throttle the bar repaints on every
+				// node. The final state still renders at Done == Total.
+				progressbar.OptionThrottle(65*time.Millisecond),
+			)
+		}
+		_ = bar.Set(p.Done)
+	}
+	return report, func() {
+		if bar != nil {
+			bar.Finish()
+		}
+	}
 }
 
 func renderBuildResult(cmd *cobra.Command, r *grove.BuildResult, dryRun bool) {

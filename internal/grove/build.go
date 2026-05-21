@@ -10,14 +10,22 @@ import (
 
 // BuildOpts configures Build.
 type BuildOpts struct {
-	Model   string // "provider/name"; if empty, falls back to config [build].model
-	Source  string // build only this source; "" builds every source
-	Rebuild bool
-	DryRun  bool
+	Model       string // "provider/name"; if empty, falls back to config [build].model
+	Source      string // build only this source; "" builds every source
+	Rebuild     bool
+	DryRun      bool
+	Concurrency int // max in-flight model calls; <= 1 builds sequentially
+
+	// OnProgress, if set, receives per-source node-build progress for an
+	// adapter to render. Nil disables progress reporting.
+	OnProgress func(BuildProgress)
 }
 
 // BuildResult reports a completed build run.
 type BuildResult = indexer.Result
+
+// BuildProgress reports per-source node-build progress.
+type BuildProgress = indexer.Progress
 
 // Build indexes connected sources into the knowledge forest. The build model
 // is resolved with precedence flag > GROVE_BUILD_MODEL > config [build].model.
@@ -47,8 +55,10 @@ func (g *Grove) Build(ctx context.Context, opts BuildOpts) (*BuildResult, error)
 		LLM:    client,
 		Layout: g.layout,
 	}, indexer.Options{
-		Source:  opts.Source,
-		Rebuild: opts.Rebuild,
-		DryRun:  opts.DryRun,
+		Source:      opts.Source,
+		Rebuild:     opts.Rebuild,
+		DryRun:      opts.DryRun,
+		Concurrency: opts.Concurrency,
+		OnProgress:  opts.OnProgress,
 	})
 }

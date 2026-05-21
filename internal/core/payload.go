@@ -42,13 +42,35 @@ func ReadNodePayload(path string) (*NodePayload, error) {
 }
 
 // WriteNodePayload encodes a node payload to disk, creating parent directories.
+// The write is atomic (temp file + rename): two nodes with identical content
+// hash to the same path, so a concurrent build (grove build --concurrency)
+// could otherwise interleave two writers and leave a torn JSON file.
 func WriteNodePayload(path string, p *NodePayload) error {
 	body, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal node payload %s: %w", p.NodeID, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, body, 0o644)
+	tmp, err := os.CreateTemp(dir, ".node-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp node payload in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close() // best-effort; the write error is the real failure
+		os.Remove(tmpName)
+		return fmt.Errorf("write node payload %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("close node payload %s: %w", path, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("rename node payload %s: %w", path, err)
+	}
+	return nil
 }
