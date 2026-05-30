@@ -41,36 +41,41 @@ func ReadNodePayload(path string) (*NodePayload, error) {
 	return &p, nil
 }
 
-// WriteNodePayload encodes a node payload to disk, creating parent directories.
-// The write is atomic (temp file + rename): two nodes with identical content
-// hash to the same path, so a concurrent build (grove build --concurrency)
-// could otherwise interleave two writers and leave a torn JSON file.
+// WriteNodePayload encodes a node payload to disk via WriteJSONAtomic.
 func WriteNodePayload(path string, p *NodePayload) error {
-	body, err := json.MarshalIndent(p, "", "  ")
+	return WriteJSONAtomic(path, p)
+}
+
+// WriteJSONAtomic marshals v (indented) and writes it to path atomically
+// (temp file + rename), creating parent directories. The atomicity matters
+// because content-addressed payloads share a path: two concurrent builders
+// writing identical content must not interleave into a torn JSON file.
+func WriteJSONAtomic(path string, v any) error {
+	body, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal node payload %s: %w", p.NodeID, err)
+		return fmt.Errorf("marshal %s: %w", path, err)
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".node-*.tmp")
+	tmp, err := os.CreateTemp(dir, ".payload-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create temp node payload in %s: %w", dir, err)
+		return fmt.Errorf("create temp payload in %s: %w", dir, err)
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(body); err != nil {
 		tmp.Close() // best-effort; the write error is the real failure
 		os.Remove(tmpName)
-		return fmt.Errorf("write node payload %s: %w", path, err)
+		return fmt.Errorf("write payload %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
-		return fmt.Errorf("close node payload %s: %w", path, err)
+		return fmt.Errorf("close payload %s: %w", path, err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		os.Remove(tmpName)
-		return fmt.Errorf("rename node payload %s: %w", path, err)
+		return fmt.Errorf("rename payload %s: %w", path, err)
 	}
 	return nil
 }

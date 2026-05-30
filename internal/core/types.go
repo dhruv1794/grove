@@ -5,8 +5,10 @@ import "time"
 type SourceType string
 
 const (
-	SourceLocal    SourceType = "local"
-	SourceObsidian SourceType = "obsidian"
+	SourceLocal      SourceType = "local"
+	SourceObsidian   SourceType = "obsidian"
+	SourceGDrive     SourceType = "gdrive"
+	SourceConfluence SourceType = "confluence"
 )
 
 type LinkType string

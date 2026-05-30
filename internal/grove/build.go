@@ -14,7 +14,8 @@ type BuildOpts struct {
 	Source      string // build only this source; "" builds every source
 	Rebuild     bool
 	DryRun      bool
-	Concurrency int // max in-flight model calls; <= 1 builds sequentially
+	NoGroup     bool // skip LLM topic grouping of flat folders
+	Concurrency int  // max in-flight model calls; <= 1 builds sequentially
 
 	// OnProgress, if set, receives per-source node-build progress for an
 	// adapter to render. Nil disables progress reporting.
@@ -32,8 +33,9 @@ type BuildProgress = indexer.Progress
 func (g *Grove) Build(ctx context.Context, opts BuildOpts) (*BuildResult, error) {
 	model := opts.Model
 	if model == "" {
-		// LoadConfigFile also applies the GROVE_BUILD_MODEL override.
-		if cfg, err := core.LoadConfigFile(g.configPath); err == nil {
+		// LoadMergedConfig overlays local on global and applies the
+		// GROVE_BUILD_MODEL override.
+		if cfg, err := core.LoadMergedConfig(g.configPath); err == nil {
 			model = cfg.Build.Model
 		}
 	}
@@ -58,6 +60,7 @@ func (g *Grove) Build(ctx context.Context, opts BuildOpts) (*BuildResult, error)
 		Source:      opts.Source,
 		Rebuild:     opts.Rebuild,
 		DryRun:      opts.DryRun,
+		NoGroup:     opts.NoGroup,
 		Concurrency: opts.Concurrency,
 		OnProgress:  opts.OnProgress,
 	})

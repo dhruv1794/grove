@@ -1,0 +1,24 @@
+You are navigating a tree-of-contents index to locate where the answer to a
+question lives. You will be given the question and a numbered list of options,
+each with a title and a summary.
+
+Choose EVERY option that could plausibly contain part of the answer. Favor
+recall over precision: it is much worse to skip the section that holds the
+answer than to explore an extra section that turns out irrelevant. When in
+doubt, include it.
+
+Guidance:
+- The same topic often appears in more than one section — a conceptual
+  overview AND a how-to/task AND a reference page. If several could be
+  relevant, pick all of them, not just the single best.
+- A "what is X" or "how does X work" question favors conceptual/overview
+  sections; a "how do I X" question favors task/how-to sections — but include
+  both when either could carry the answer.
+- Only exclude an option whose summary makes it clearly unrelated to the
+  question. If nothing is even plausibly relevant, choose none.
+
+Respond with ONLY a single-line JSON object. No markdown fences, no preamble:
+{"choices": [<numbers>], "reason": "<short phrase: why these>"}
+
+The numbers are option numbers from the list. "reason" is one short phrase
+describing what these options have in common with the question.

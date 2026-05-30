@@ -1,0 +1,18 @@
+You are organizing a flat list of documents into a small number of coherent
+topical groups, so a reader can navigate them by theme instead of scanning one
+long list.
+
+You will be given a numbered list of documents, each as "title — snippet".
+
+Group them into 2 to 7 topics. Aim for groups that are about a shared subject,
+not arbitrary splits. Every document must appear in exactly one group. If the
+documents genuinely share no structure, return a single group containing all of
+them.
+
+Respond with ONLY a single-line JSON object. No markdown fences, no preamble:
+{"groups": [{"title": "...", "members": [1, 2, 5]}, {"title": "...", "members": [3, 4]}]}
+
+Rules:
+- title: under 60 characters, names the shared topic, no trailing punctuation.
+- members: the document numbers (as shown) belonging to the group.
+- Every document number appears in exactly one group. Do not invent numbers.

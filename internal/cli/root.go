@@ -37,7 +37,11 @@ func NewRootCmd() *cobra.Command {
 	root.AddCommand(newDisconnectCmd())
 	root.AddCommand(newSourcesCmd())
 	root.AddCommand(newBuildCmd())
+	root.AddCommand(newSyncCmd())
+	root.AddCommand(newEmbedCmd())
 	root.AddCommand(newAskCmd())
+	root.AddCommand(newReplCmd())
 	root.AddCommand(newTreeCmd())
+	root.AddCommand(newConfigCmd())
 	return root
 }

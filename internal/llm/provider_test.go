@@ -124,3 +124,45 @@ func TestOllamaHostOverride(t *testing.T) {
 		t.Errorf("baseURL = %q, want http://box:9999/v1", got)
 	}
 }
+
+func TestHTTPStatusError_ContextLength(t *testing.T) {
+	spec := ModelSpec{Provider: "ollama", Name: "bge-m3"}
+	// A 400 describing a context overflow → ErrContextLength (so embed can retry).
+	err := httpStatusError(spec, 400, []byte(`{"error":"input length exceeds context length"}`))
+	if !errors.Is(err, ErrContextLength) {
+		t.Errorf("400 context body: got %v, want ErrContextLength", err)
+	}
+	// A 400 that is not a context overflow → not ErrContextLength.
+	other := httpStatusError(spec, 400, []byte(`{"error":"bad request: unknown field"}`))
+	if errors.Is(other, ErrContextLength) {
+		t.Errorf("generic 400 misclassified as ErrContextLength: %v", other)
+	}
+	// Non-400 stays unaffected.
+	if errors.Is(httpStatusError(spec, 404, []byte("not found")), ErrContextLength) {
+		t.Error("404 misclassified as ErrContextLength")
+	}
+}
+
+func TestIsContextLengthError(t *testing.T) {
+	hits := []string{
+		"input length exceeds context length",
+		"This model's maximum context length is 512 tokens",
+		"prompt is too long: 215263 tokens > 200000 maximum",
+		"requested 9000 tokens, longer than the model's context window",
+	}
+	for _, s := range hits {
+		if !isContextLengthError(s) {
+			t.Errorf("isContextLengthError(%q) = false, want true", s)
+		}
+	}
+	// Ambiguous phrases without a token/context cue must NOT classify as overflow.
+	for _, s := range []string{
+		"unauthorized", "model not found", "rate limited",
+		"field 'name' value is too long",
+		"input length must be a positive integer",
+	} {
+		if isContextLengthError(s) {
+			t.Errorf("isContextLengthError(%q) = true, want false", s)
+		}
+	}
+}

@@ -34,6 +34,12 @@ type bnode struct {
 // structure is unchanged (per documents/03 §"Node identity rule").
 func nodeID(treeID, path string) string { return treeID + ":" + path }
 
+// topicSep joins a parent node id to a grouping-derived suffix in a topic
+// node's id (e.g. "notes:dir/topic-ab12cd34"); see indexer.applyGroups.
+const topicSep = "/topic-"
+
+func topicNodeID(parentID, hash string) string { return parentID + topicSep + hash }
+
 // assembleTree builds the in-memory tree for one source: an internal node per
 // directory segment of each document's native Hierarchy, with a leaf node per
 // document. The returned bnode is the tree root.

@@ -65,12 +65,17 @@ func (q *querier) summary(lt *loadedTree, nodeID string) (title, summary string)
 // descend walks one tree from nodeID, asking the model which children to
 // explore at each internal node, and appends every reached leaf to leaves.
 func (q *querier) descend(ctx context.Context, lt *loadedTree, nodeID string, depth int, leaves *[]string) error {
+	if len(*leaves) >= maxReachedLeaves {
+		return nil // enough candidates gathered; the ranker trims to the cap
+	}
 	kids := lt.children[nodeID]
 	if len(kids) == 0 {
 		*leaves = append(*leaves, nodeID)
 		return nil
 	}
-	if depth >= q.opts.MaxDepth {
+	// Out of depth or navigate budget: gather what's under this node directly
+	// (bounded by the reached-leaf cap) rather than calling the model again.
+	if depth >= q.opts.MaxDepth || q.navBudget <= 0 {
 		collectLeaves(lt, nodeID, leaves)
 		return nil
 	}
@@ -78,11 +83,15 @@ func (q *querier) descend(ctx context.Context, lt *loadedTree, nodeID string, de
 	for i, kid := range kids {
 		opts[i].title, opts[i].summary = q.summary(lt, kid)
 	}
+	q.navBudget--
 	chosen, reason, err := q.navigate(ctx, opts)
 	if err != nil {
 		return err
 	}
 	for _, idx := range chosen {
+		if len(*leaves) >= maxReachedLeaves {
+			break
+		}
 		kid := kids[idx]
 		title, _ := q.summary(lt, kid)
 		q.trace = append(q.trace, TraceStep{Tree: lt.tree.Name, Node: title, Reason: reason})
@@ -96,12 +105,18 @@ func (q *querier) descend(ctx context.Context, lt *loadedTree, nodeID string, de
 // collectLeaves gathers every leaf under nodeID, used when the depth limit is
 // reached at an internal node.
 func collectLeaves(lt *loadedTree, nodeID string, leaves *[]string) {
+	if len(*leaves) >= maxReachedLeaves {
+		return
+	}
 	kids := lt.children[nodeID]
 	if len(kids) == 0 {
 		*leaves = append(*leaves, nodeID)
 		return
 	}
 	for _, kid := range kids {
+		if len(*leaves) >= maxReachedLeaves {
+			return
+		}
 		collectLeaves(lt, kid, leaves)
 	}
 }
@@ -137,16 +152,15 @@ func (q *querier) navigate(ctx context.Context, opts []option) (chosen []int, re
 // the reason from a navigate response. Out-of-range and duplicate numbers are
 // dropped; an unparseable response yields no choices.
 func parseChoices(content string, n int) (idx []int, reason string) {
-	i := strings.IndexByte(content, '{')
-	j := strings.LastIndexByte(content, '}')
-	if i < 0 || j <= i {
+	span, ok := core.JSONObjectSpan(content)
+	if !ok {
 		return nil, ""
 	}
 	var out struct {
 		Choices []int  `json:"choices"`
 		Reason  string `json:"reason"`
 	}
-	if err := json.Unmarshal([]byte(content[i:j+1]), &out); err != nil {
+	if err := json.Unmarshal([]byte(span), &out); err != nil {
 		return nil, ""
 	}
 	seen := map[int]bool{}

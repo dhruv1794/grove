@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -9,6 +10,39 @@ import (
 
 	"grove/internal/core"
 )
+
+// ErrContextLength signals that an input overflowed the model's context window
+// (typically an HTTP 400 from the embeddings/chat endpoint). Callers can detect
+// it with errors.Is to fall back to a shorter input rather than abort the run.
+var ErrContextLength = errors.New("input exceeds model context length")
+
+// isContextLengthError reports whether a provider error body describes a
+// context-window overflow. Providers phrase it differently; match the common
+// substrings case-insensitively.
+func isContextLengthError(body string) bool {
+	b := strings.ToLower(body)
+	// Unambiguous: these phrases appear only in context-overflow errors.
+	for _, s := range []string{
+		"context length", "context window", "maximum context",
+		"exceeds context", "context_length_exceeded",
+	} {
+		if strings.Contains(b, s) {
+			return true
+		}
+	}
+	// Ambiguous: "too long" / "longer than" / "input length" also show up in
+	// unrelated 400s (a too-long field value, a malformed input). Treat them as
+	// overflow only when the body also mentions tokens or context — which every
+	// real overflow error does (e.g. Anthropic's "prompt is too long: N tokens").
+	if strings.Contains(b, "token") || strings.Contains(b, "context") {
+		for _, s := range []string{"too long", "longer than", "input length"} {
+			if strings.Contains(b, s) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // ModelSpec is a parsed "provider/name" model identifier.
 type ModelSpec struct {
@@ -36,6 +70,7 @@ func ParseModel(s string) (ModelSpec, error) {
 type Options struct {
 	OpenAIKey    string // GROVE_OPENAI_API_KEY
 	AnthropicKey string // GROVE_ANTHROPIC_API_KEY
+	DeepSeekKey  string // GROVE_DEEPSEEK_API_KEY
 	APIKey       string // generic key for other OpenAI-compatible providers (together, groq, vllm)
 	OllamaHost   string // GROVE_OLLAMA_HOST, e.g. http://localhost:11434
 	BaseURL      string // overrides the provider's default endpoint (required for vllm, llamacpp)
@@ -48,6 +83,7 @@ func OptionsFromEnv() Options {
 	return Options{
 		OpenAIKey:    os.Getenv("GROVE_OPENAI_API_KEY"),
 		AnthropicKey: os.Getenv("GROVE_ANTHROPIC_API_KEY"),
+		DeepSeekKey:  os.Getenv("GROVE_DEEPSEEK_API_KEY"),
 		OllamaHost:   os.Getenv("GROVE_OLLAMA_HOST"),
 	}
 }
@@ -58,6 +94,7 @@ var openAIBaseURLs = map[string]string{
 	"openai":   "https://api.openai.com/v1",
 	"together": "https://api.together.xyz/v1",
 	"groq":     "https://api.groq.com/openai/v1",
+	"deepseek": "https://api.deepseek.com/v1",
 	"ollama":   "http://localhost:11434/v1",
 	"vllm":     "",
 	"llamacpp": "",
@@ -86,7 +123,7 @@ func New(spec ModelSpec, opts Options) (LLM, error) {
 	if !known {
 		return nil, core.NewError(core.KindMisuse,
 			fmt.Sprintf("unknown model provider %q", spec.Provider),
-			"supported providers: openai, anthropic, ollama, together, groq, vllm, llamacpp")
+			"supported providers: openai, anthropic, deepseek, ollama, together, groq, vllm, llamacpp")
 	}
 	if spec.Provider == "ollama" && opts.OllamaHost != "" {
 		base = strings.TrimRight(opts.OllamaHost, "/") + "/v1"
@@ -101,8 +138,11 @@ func New(spec ModelSpec, opts Options) (LLM, error) {
 	}
 
 	key := opts.APIKey
-	if spec.Provider == "openai" && key == "" {
+	switch {
+	case spec.Provider == "openai" && opts.OpenAIKey != "":
 		key = opts.OpenAIKey
+	case spec.Provider == "deepseek" && opts.DeepSeekKey != "":
+		key = opts.DeepSeekKey
 	}
 	return &openaiClient{spec: spec, baseURL: base, apiKey: key, hc: hc}, nil
 }
@@ -115,6 +155,13 @@ func httpStatusError(spec ModelSpec, status int, body []byte) error {
 		snippet = snippet[:300] + "…"
 	}
 	switch status {
+	case http.StatusBadRequest:
+		if isContextLengthError(snippet) {
+			return fmt.Errorf("%w: model %s: %s", ErrContextLength, spec, snippet)
+		}
+		return core.NewError(core.KindModelUnreachable,
+			fmt.Sprintf("model %s rejected the request (HTTP 400): %s", spec, snippet),
+			"check the model name and request; for embeddings, lower --max-chars")
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return core.NewError(core.KindModelUnreachable,
 			fmt.Sprintf("model %s rejected the request (HTTP %d)", spec, status),

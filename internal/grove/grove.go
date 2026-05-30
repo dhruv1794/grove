@@ -57,5 +57,39 @@ func Open(ctx context.Context, opts Options) (*Grove, error) {
 // Layout returns the resolved workspace layout for this handle.
 func (g *Grove) Layout() core.Layout { return g.layout }
 
+// ConfigPath returns the config.toml path this handle resolves models from.
+func (g *Grove) ConfigPath() string { return g.configPath }
+
+// SetQueryModel persists the default query model, surviving across sessions. It
+// writes the local workspace config when that file already sets a query model
+// (an opted-in per-forest override), otherwise the global ~/.grove/config.toml
+// so the default applies to every forest.
+func (g *Grove) SetQueryModel(model string) error {
+	local, _ := core.LoadRawConfig(g.configPath)
+	return core.UpdateConfigFile(g.modelWritePath(local.Query.Model != ""),
+		func(c *core.Config) { c.Query.Model = model })
+}
+
+// SetBuildModel persists the default build/index model with the same
+// local-if-overridden-else-global rule as SetQueryModel.
+func (g *Grove) SetBuildModel(model string) error {
+	local, _ := core.LoadRawConfig(g.configPath)
+	return core.UpdateConfigFile(g.modelWritePath(local.Build.Model != ""),
+		func(c *core.Config) { c.Build.Model = model })
+}
+
+// modelWritePath returns the local config path when the forest already
+// overrides the key, else the global config path (falling back to local if the
+// home dir can't be resolved).
+func (g *Grove) modelWritePath(localOverrides bool) string {
+	if localOverrides {
+		return g.configPath
+	}
+	if gp, err := core.GlobalConfigPath(); err == nil {
+		return gp
+	}
+	return g.configPath
+}
+
 // Close releases the workspace store.
 func (g *Grove) Close() error { return g.store.Close() }

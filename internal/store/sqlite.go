@@ -166,6 +166,15 @@ func (s *SQLite) DeleteSource(ctx context.Context, name string) (int, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM fts_documents WHERE doc_id IN (SELECT id FROM documents WHERE source = ?)`, name); err != nil {
 		return 0, err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM doc_embeddings WHERE source = ?`, name); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_embeddings WHERE source = ?`, name); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunk_embeddings WHERE source = ?`, name); err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE source = ?`, name)
 	if err != nil {
 		return 0, err
@@ -383,36 +392,105 @@ func (s *SQLite) GetDocument(ctx context.Context, id string) (*core.Document, er
 	return &d, nil
 }
 
-// ListDocumentsBySource returns every document for a source as a full
-// core.Document, including Content/Hierarchy/Links. Identity and metadata
-// come from the authoritative SQLite row; content-derived fields come from
-// the content-addressed payload, which duplicate-content docs share — so
-// payloads are read once per distinct hash.
-func (s *SQLite) ListDocumentsBySource(ctx context.Context, source string) ([]core.Document, error) {
+// ListDocumentMetaBySource returns every document for a source with its
+// metadata plus Hierarchy and Links, but NOT Content — the indexer needs the
+// structure (Hierarchy) and links to build and cross-link the tree, while the
+// (large) body is fetched lazily per node via GetDocumentContent only on a
+// cache miss. Keeping content out of this list bounds the build's working set
+// to O(metadata) rather than O(corpus content). Payloads are read to source
+// Hierarchy/Links but their content is not retained.
+func (s *SQLite) ListDocumentMetaBySource(ctx context.Context, source string) ([]core.Document, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+docScanCols+` FROM documents WHERE source = ? ORDER BY source_ref`, source)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	payloads := map[string]*core.Document{}
 	var out []core.Document
 	for rows.Next() {
 		d, err := scanDocRow(rows)
 		if err != nil {
 			return nil, err
 		}
-		p, ok := payloads[d.Hash]
-		if !ok {
-			if p, err = s.readDocPayload(d.Hash); err != nil {
-				return nil, fmt.Errorf("document %s: %w", d.ID, err)
-			}
-			payloads[d.Hash] = p
+		p, err := s.readDocPayload(d.Hash)
+		if err != nil {
+			return nil, fmt.Errorf("document %s: %w", d.ID, err)
 		}
-		d.Content, d.Hierarchy, d.Links = p.Content, p.Hierarchy, p.Links
+		d.Hierarchy, d.Links = p.Hierarchy, p.Links
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// GetDocumentContent returns just the body of the content-addressed payload for
+// a hash — the lazy companion to ListDocumentMetaBySource.
+func (s *SQLite) GetDocumentContent(ctx context.Context, hash string) (string, error) {
+	p, err := s.readDocPayload(hash)
+	if err != nil {
+		return "", err
+	}
+	return p.Content, nil
+}
+
+// ListDocumentDigests returns id→hash for a source without reading content
+// payloads — the cheap lookup `grove sync` diffs the current walk against.
+func (s *SQLite) ListDocumentDigests(ctx context.Context, source string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, hash FROM documents WHERE source = ?`, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			return nil, err
+		}
+		out[id] = hash
+	}
+	return out, rows.Err()
+}
+
+// DeleteDocuments removes documents by id along with their doc_links and FTS
+// rows, in one transaction. Mirrors DeleteSource's per-document cleanup. The
+// content-addressed payload files are left on disk (shareable across docs/
+// sources — reclaimed by a future `grove gc`). node_docs rows are cleared when
+// the affected tree is rebuilt. Returns the number of documents deleted.
+func (s *SQLite) DeleteDocuments(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	deleted := 0
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM doc_links WHERE from_doc = ?`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM fts_documents WHERE doc_id = ?`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM doc_embeddings WHERE doc_id = ?`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM chunk_embeddings WHERE doc_id = ?`, id); err != nil {
+			return 0, err
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM documents WHERE id = ?`, id)
+		if err != nil {
+			return 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			deleted += int(n)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deleted, nil
 }
 
 // GetDocuments returns full core.Documents (including Content/Hierarchy/Links)
@@ -503,6 +581,18 @@ func ftsMatchQuery(q string) string {
 // limit caps the result count (<= 0 → 12). It backs `grove ask --fast` and
 // makes no LLM call.
 func (s *SQLite) SearchDocuments(ctx context.Context, query, source string, limit int) ([]string, error) {
+	hits, err := s.SearchDocumentsScored(ctx, query, source, limit)
+	if err != nil || hits == nil {
+		return nil, err
+	}
+	out := make([]string, len(hits))
+	for i, h := range hits {
+		out[i] = h.ID
+	}
+	return out, nil
+}
+
+func (s *SQLite) SearchDocumentsScored(ctx context.Context, query, source string, limit int) ([]Hit, error) {
 	match := ftsMatchQuery(query)
 	if match == "" {
 		return nil, nil
@@ -510,15 +600,16 @@ func (s *SQLite) SearchDocuments(ctx context.Context, query, source string, limi
 	if limit <= 0 {
 		limit = 12
 	}
-	q := `SELECT doc_id FROM fts_documents WHERE fts_documents MATCH ?`
+	// bm25 weights, in column order: doc_id, source (both UNINDEXED, ignored),
+	// title 10×, content 1×. Lower bm25 = better, so ascending order is best-first.
+	q := `SELECT doc_id, bm25(fts_documents, 1.0, 1.0, 10.0, 1.0) AS score
+	      FROM fts_documents WHERE fts_documents MATCH ?`
 	args := []any{match}
 	if source != "" {
 		q += ` AND source = ?`
 		args = append(args, source)
 	}
-	// bm25 weights, in column order: doc_id, source (both UNINDEXED, ignored),
-	// title 10×, content 1×. Lower bm25 = better, so ascending order is best-first.
-	q += ` ORDER BY bm25(fts_documents, 1.0, 1.0, 10.0, 1.0) LIMIT ?`
+	q += ` ORDER BY score LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -526,13 +617,13 @@ func (s *SQLite) SearchDocuments(ctx context.Context, query, source string, limi
 		return nil, fmt.Errorf("fts search %q: %w", query, err)
 	}
 	defer rows.Close()
-	var out []string
+	var out []Hit
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var h Hit
+		if err := rows.Scan(&h.ID, &h.Score); err != nil {
 			return nil, err
 		}
-		out = append(out, id)
+		out = append(out, h)
 	}
 	return out, rows.Err()
 }
@@ -851,6 +942,9 @@ func (s *SQLite) DeleteNodesByTree(ctx context.Context, treeID string) (int, err
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM node_docs WHERE node_id IN (`+nodeIDsByTree+`)`, treeID); err != nil {
 		return 0, fmt.Errorf("delete node_docs for tree %s: %w", treeID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_embeddings WHERE tree_id = ?`, treeID); err != nil {
+		return 0, fmt.Errorf("delete node_embeddings for tree %s: %w", treeID, err)
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE tree_id = ?`, treeID)
 	if err != nil {

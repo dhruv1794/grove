@@ -693,6 +693,42 @@ func TestSearchDocuments(t *testing.T) {
 	}
 }
 
+func TestSearchDocumentsScored(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertSource(ctx, core.Source{Name: "notes", Type: core.SourceLocal, ConnectedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertDocuments(ctx, []core.Document{
+		{ID: "d1", Source: "notes", SourceRef: "a.md", Title: "Login", Hash: "h1", Content: "Users sign in with a password."},
+		{ID: "d2", Source: "notes", SourceRef: "b.md", Title: "Deploy", Hash: "h2", Content: "The login service restarts after a deploy."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.SearchDocumentsScored(ctx, "login", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 || hits[0].ID != "d1" {
+		t.Fatalf("scored search: got %+v, want d1 first", hits)
+	}
+	// bm25 is ascending (lower = better), so the best hit's score must not exceed the next.
+	if hits[0].Score > hits[1].Score {
+		t.Errorf("bm25 order: hits[0].Score %v > hits[1].Score %v", hits[0].Score, hits[1].Score)
+	}
+	// IDs from the scored variant must match the plain variant exactly.
+	plain, _ := s.SearchDocuments(ctx, "login", "", 10)
+	for i, h := range hits {
+		if h.ID != plain[i] {
+			t.Errorf("scored vs plain order mismatch at %d: %s != %s", i, h.ID, plain[i])
+		}
+	}
+	// punctuation-only → nil (parity with the plain variant).
+	if h, err := s.SearchDocumentsScored(ctx, " ?? ", "", 10); err != nil || h != nil {
+		t.Errorf("scored punctuation-only: got %v, %v", h, err)
+	}
+}
+
 func TestFindDocuments(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
@@ -752,5 +788,65 @@ func TestCountDocumentsBySource(t *testing.T) {
 	}
 	if counts["a"] != 2 || counts["b"] != 1 {
 		t.Errorf("counts: got %v, want {a:2 b:1}", counts)
+	}
+}
+
+func TestEmbeddingModels(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertEmbedding(ctx, "d1", "src", "ollama/nomic-embed-text", []float32{1, 2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertEmbedding(ctx, "d2", "src", "ollama/nomic-embed-text", []float32{4, 5, 6}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertEmbedding(ctx, "d3", "other", "ollama/bge-m3", []float32{7, 8, 9, 0}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.EmbeddingModels(ctx, "src")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "ollama/nomic-embed-text" {
+		t.Errorf("EmbeddingModels(src) = %v, want [ollama/nomic-embed-text]", got)
+	}
+	all, err := s.EmbeddingModels(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Errorf("EmbeddingModels(all) = %v, want 2 distinct models", all)
+	}
+}
+
+func TestNodeEmbeddings(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertNodeEmbedding(ctx, "t1:topic-a", "t1", "src", "ollama/bge-m3", []float32{1, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertNodeEmbedding(ctx, "t1:topic-b", "t1", "src", "ollama/bge-m3", []float32{0, 1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	// different dimension → skipped by search, but still counted/stored
+	if err := s.UpsertNodeEmbedding(ctx, "t2:root", "t2", "other", "x", []float32{1, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CountNodeEmbeddings(ctx, "src"); err != nil || n != 2 {
+		t.Fatalf("CountNodeEmbeddings(src) = %d, %v; want 2", n, err)
+	}
+	hits, err := s.SearchNodesByVector(ctx, []float32{0.9, 0.1, 0}, "src", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 || hits[0].NodeID != "t1:topic-a" || hits[0].TreeID != "t1" {
+		t.Fatalf("SearchNodesByVector = %+v; want topic-a (t1) first", hits)
+	}
+	// upsert overwrites in place
+	if err := s.UpsertNodeEmbedding(ctx, "t1:topic-a", "t1", "src", "ollama/bge-m3", []float32{0, 0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := s.CountNodeEmbeddings(ctx, "src"); n != 2 {
+		t.Errorf("after re-upsert count = %d; want 2 (in-place)", n)
 	}
 }

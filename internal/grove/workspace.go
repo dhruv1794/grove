@@ -9,20 +9,9 @@ import (
 	"grove/internal/store"
 )
 
-const defaultConfigTOML = `# grove workspace configuration
-# Created by ` + "`grove init`" + `. Safe to edit.
-
-[workspace]
-schema_version = 1
-
-[build]
-# default model used by ` + "`grove build`" + ` when --model is omitted
-# model = "ollama/qwen2.5:32b"
-
-[query]
-# default model used by ` + "`grove ask`" + ` when --model is omitted
-# model = "anthropic/claude-sonnet-4-6"
-`
+var defaultConfigTOML = core.RenderConfigTemplate(core.Config{
+	Workspace: core.WorkspaceConfig{SchemaVersion: 1},
+})
 
 // Init creates a new grove workspace at the given layout: directories,
 // config.toml, and a migrated SQLite database. It errors if a workspace

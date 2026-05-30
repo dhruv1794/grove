@@ -41,6 +41,7 @@ type Options struct {
 	Source      string // build only this source; "" builds every source
 	Rebuild     bool   // ignore the node cache; re-call the model for every node
 	DryRun      bool   // plan and report the work; no model calls, no writes
+	NoGroup     bool   // skip LLM topic grouping of flat folders (mirror structure only)
 	Concurrency int    // max in-flight model calls; <= 1 builds sequentially
 
 	// OnProgress, if set, is called as a source's nodes are processed. It is
@@ -62,6 +63,7 @@ type Result struct {
 	Model      string    `json:"model"`
 	Trees      int       `json:"trees"`
 	Nodes      int       `json:"nodes"`
+	Groups     int       `json:"groups"` // topic nodes created by LLM grouping of flat folders
 	CacheHits  int       `json:"cache_hits"`
 	CacheMiss  int       `json:"cache_miss"`
 	CrossLinks int       `json:"cross_links"`
@@ -146,7 +148,7 @@ type builder struct {
 }
 
 func (b *builder) buildSource(ctx context.Context, src core.Source) error {
-	docs, err := b.deps.Store.ListDocumentsBySource(ctx, src.Name)
+	docs, err := b.deps.Store.ListDocumentMetaBySource(ctx, src.Name)
 	if err != nil {
 		return err
 	}
@@ -157,6 +159,13 @@ func (b *builder) buildSource(ctx context.Context, src core.Source) error {
 
 	treeID := src.Name
 	root := assembleTree(treeID, docs)
+	// Topic grouping needs model calls, so it is skipped on a dry run (which
+	// makes none) — dry-run node counts therefore omit any topic nodes.
+	if !b.opts.NoGroup && !b.opts.DryRun {
+		if err := b.regroup(ctx, root); err != nil {
+			return err
+		}
+	}
 	b.progressStart(src.Name, root)
 	if err := b.processNode(ctx, root); err != nil {
 		return err
@@ -301,10 +310,14 @@ func (b *builder) fillNode(ctx context.Context, n *bnode) error {
 			return ctx.Err()
 		}
 	}
+	userMsg, err := b.nodeContent(ctx, n)
+	if err != nil {
+		return err
+	}
 	resp, err := b.deps.LLM.Complete(ctx, llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: prompts.Node.Template},
-			{Role: llm.RoleUser, Content: b.nodeContent(n)},
+			{Role: llm.RoleUser, Content: userMsg},
 		},
 		Temperature: requestTemp,
 		MaxTokens:   requestMaxTokens,
@@ -331,15 +344,19 @@ func (b *builder) tally(f func(*Result)) {
 }
 
 // nodeContent assembles the user message for a node: a leaf supplies its
-// document's (truncated) text; an internal node supplies its children's
-// titles and summaries.
-func (b *builder) nodeContent(n *bnode) string {
+// document's (truncated) text, fetched lazily here since it is only needed on a
+// cache miss; an internal node supplies its children's titles and summaries.
+func (b *builder) nodeContent(ctx context.Context, n *bnode) (string, error) {
 	if n.doc != nil {
+		body, err := b.deps.Store.GetDocumentContent(ctx, n.doc.Hash)
+		if err != nil {
+			return "", fmt.Errorf("load content for %s: %w", n.doc.ID, err)
+		}
 		title := n.doc.Title
 		if title == "" {
 			title = filepath.Base(n.doc.SourceRef)
 		}
-		return "DOCUMENT: " + title + "\n\n" + core.TruncateRunes(n.doc.Content, maxLeafChars)
+		return "DOCUMENT: " + title + "\n\n" + core.TruncateRunes(body, maxLeafChars), nil
 	}
 	var sb strings.Builder
 	sb.WriteString("SECTION grouping these subsections:\n")
@@ -350,7 +367,7 @@ func (b *builder) nodeContent(n *bnode) string {
 		}
 		fmt.Fprintf(&sb, "- %s: %s\n", c.title, summary)
 	}
-	return sb.String()
+	return sb.String(), nil
 }
 
 func (b *builder) fallbackTitle(n *bnode) string {
@@ -387,14 +404,12 @@ func (b *builder) writeNodePayload(n *bnode) error {
 // occasionally wrap the JSON in prose or fences, so the first {...} span is
 // taken; on any failure the whole response is used as the summary.
 func parseSummary(s string) (title, summary string) {
-	i := strings.IndexByte(s, '{')
-	j := strings.LastIndexByte(s, '}')
-	if i >= 0 && j > i {
+	if span, ok := core.JSONObjectSpan(s); ok {
 		var out struct {
 			Title   string `json:"title"`
 			Summary string `json:"summary"`
 		}
-		if err := json.Unmarshal([]byte(s[i:j+1]), &out); err == nil {
+		if err := json.Unmarshal([]byte(span), &out); err == nil {
 			return strings.TrimSpace(out.Title), strings.TrimSpace(out.Summary)
 		}
 	}

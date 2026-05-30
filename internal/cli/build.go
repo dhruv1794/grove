@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 
 func newBuildCmd() *cobra.Command {
 	var model, source string
-	var rebuild, dryRun bool
+	var rebuild, dryRun, noGroup bool
 	var concurrency int
 
 	cmd := &cobra.Command{
@@ -40,6 +41,7 @@ func newBuildCmd() *cobra.Command {
 				Source:      source,
 				Rebuild:     rebuild,
 				DryRun:      dryRun,
+				NoGroup:     noGroup,
 				Concurrency: concurrency,
 				OnProgress:  onProgress,
 			})
@@ -59,6 +61,7 @@ func newBuildCmd() *cobra.Command {
 	cmd.Flags().StringVar(&source, "source", "", "build only this source (default: all)")
 	cmd.Flags().BoolVar(&rebuild, "rebuild", false, "ignore the node cache; re-call the model for every node")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report the work without calling the model or writing")
+	cmd.Flags().BoolVar(&noGroup, "no-group", false, "mirror folder structure only; skip LLM topic grouping of flat folders")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 4, "max in-flight model calls (1 = sequential)")
 	return cmd
 }
@@ -109,6 +112,15 @@ func renderBuildResult(cmd *cobra.Command, r *grove.BuildResult, dryRun bool) {
 	}
 	fmt.Fprintf(out, "built %s, %s (%d from cache, %d generated)\n",
 		plural(r.Trees, "tree"), plural(r.Nodes, "node"), r.CacheHits, r.CacheMiss)
+	renderBuildStats(out, r)
+}
+
+// renderBuildStats prints the grouping/cross-link/model/cost/elapsed lines
+// shared by `grove build` and the rebuild tail of `grove sync`.
+func renderBuildStats(out io.Writer, r *grove.BuildResult) {
+	if r.Groups > 0 {
+		fmt.Fprintf(out, "groups:  %s from flat folders\n", plural(r.Groups, "topic"))
+	}
 	if r.CrossLinks > 0 {
 		fmt.Fprintf(out, "links:   %s\n", plural(r.CrossLinks, "cross-link"))
 	}

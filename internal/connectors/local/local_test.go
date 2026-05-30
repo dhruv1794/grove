@@ -54,6 +54,39 @@ func TestWalk_SkipsIgnoredDirs(t *testing.T) {
 	}
 }
 
+func TestEnumerate_ListsIDsRespectingFilters(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "keep.md"), "# Keep")
+	writeFile(t, filepath.Join(root, "sub", "deep.md"), "# Deep")
+	writeFile(t, filepath.Join(root, ".git", "config.md"), "# Git") // ignored dir
+	writeFile(t, filepath.Join(root, "image.png"), "binary")        // unsupported ext
+
+	c := New()
+	if err := c.Connect(context.Background(), connectors.ConnectorConfig{
+		Name: "t", Custom: map[string]string{"path": root},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, errs := c.Enumerate(context.Background())
+	got, err := connectors.DrainChan(ids, errs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Enumerate must return the same IDs the document walk produces — no more,
+	// no fewer — so deletion detection lines up with what was indexed.
+	want := map[string]bool{docID("t", "keep.md"): true, docID("t", "sub/deep.md"): true}
+	if len(got) != len(want) {
+		t.Fatalf("enumerated %d ids, want %d: %v", len(got), len(want), got)
+	}
+	for _, id := range got {
+		if !want[id] {
+			t.Errorf("unexpected id %q", id)
+		}
+	}
+}
+
 func TestWalk_RespectsGitignore(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, ".gitignore"), "secret.md\ndrafts/\n")

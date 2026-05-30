@@ -79,6 +79,45 @@ func seedNotes(t *testing.T, s *store.SQLite) {
 	}
 }
 
+// contentCounter wraps a Store to count GetDocumentContent calls, so a test can
+// assert document bodies are read lazily (only on a cache miss).
+type contentCounter struct {
+	store.Store
+	calls int
+}
+
+func (c *contentCounter) GetDocumentContent(ctx context.Context, hash string) (string, error) {
+	c.calls++
+	return c.Store.GetDocumentContent(ctx, hash)
+}
+
+// TestBuildLazyContent proves leaf bodies are fetched only on a cache miss:
+// the cold build reads each of the two leaves' content once, and the fully
+// cached rebuild reads no content at all.
+func TestBuildLazyContent(t *testing.T) {
+	ctx := context.Background()
+	s, layout := newTestStore(t)
+	seedNotes(t, s) // 2 leaf docs (root-level + sub/)
+
+	cs := &contentCounter{Store: s}
+	deps := Deps{Store: cs, LLM: &fakeLLM{}, Layout: layout}
+
+	if _, err := Build(ctx, deps, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if cs.calls != 2 {
+		t.Errorf("cold build content reads = %d, want 2 (one per leaf miss)", cs.calls)
+	}
+
+	cs.calls = 0
+	if _, err := Build(ctx, deps, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if cs.calls != 0 {
+		t.Errorf("cached rebuild content reads = %d, want 0 (lazy: no miss)", cs.calls)
+	}
+}
+
 func TestBuildAndCache(t *testing.T) {
 	ctx := context.Background()
 	s, layout := newTestStore(t)
@@ -179,7 +218,9 @@ func TestBuildConcurrent(t *testing.T) {
 
 	f := &fakeLLM{}
 	deps := Deps{Store: s, LLM: f, Layout: layout}
-	res, err := Build(ctx, deps, Options{Concurrency: 4})
+	// NoGroup: this test pins concurrent node building + caching; topic grouping
+	// (which 12 flat docs would otherwise trigger) is covered in group_test.go.
+	res, err := Build(ctx, deps, Options{Concurrency: 4, NoGroup: true})
 	if err != nil {
 		t.Fatalf("concurrent Build: %v", err)
 	}
@@ -195,7 +236,7 @@ func TestBuildConcurrent(t *testing.T) {
 	}
 
 	// Concurrent rebuild is fully cached: no model calls.
-	res2, err := Build(ctx, deps, Options{Concurrency: 4})
+	res2, err := Build(ctx, deps, Options{Concurrency: 4, NoGroup: true})
 	if err != nil {
 		t.Fatalf("concurrent rebuild: %v", err)
 	}

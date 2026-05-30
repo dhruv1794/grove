@@ -113,4 +113,53 @@ var migrations = []string{
 	  tokenize = 'porter unicode61'
 	);
 	`,
+	// 0003 — dense embeddings for semantic retrieval. Vectors are stored as a
+	// little-endian float32 BLOB; grove brute-forces cosine similarity in Go
+	// (no vector-DB dependency — fine at local-first corpus sizes). dim lets a
+	// reader decode the blob and skip vectors from a different embedding model.
+	`
+	CREATE TABLE IF NOT EXISTS doc_embeddings (
+	  doc_id  TEXT PRIMARY KEY,
+	  source  TEXT NOT NULL,
+	  model   TEXT NOT NULL,
+	  dim     INTEGER NOT NULL,
+	  vec     BLOB NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_doc_embeddings_source ON doc_embeddings(source);
+	`,
+	// 0004 — embeddings for internal tree-node summaries ("collapsed tree"
+	// retrieval). A query that matches a node's abstractive summary surfaces that
+	// subtree's leaf docs, so the tree contributes as a retrieval signal at every
+	// level (fused via RRF) instead of only via greedy descent. Same little-endian
+	// float32 BLOB / dim convention as doc_embeddings; tree_id lets the retriever
+	// expand a matched node to its leaves.
+	`
+	CREATE TABLE IF NOT EXISTS node_embeddings (
+	  node_id TEXT PRIMARY KEY,
+	  tree_id TEXT NOT NULL,
+	  source  TEXT NOT NULL,
+	  model   TEXT NOT NULL,
+	  dim     INTEGER NOT NULL,
+	  vec     BLOB NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_node_embeddings_source ON node_embeddings(source);
+	CREATE INDEX IF NOT EXISTS idx_node_embeddings_tree ON node_embeddings(tree_id);
+	`,
+	// 0005 — passage-level embeddings (semantic chunking experiment). One doc maps
+	// to N chunk vectors so the semantic retriever can match a passage inside a
+	// long document rather than the whole-doc average; search dedups to the parent
+	// doc. Same blob/dim convention as doc_embeddings. Opt-in (grove embed --chunks
+	// / ask --chunk-embed) — a gate on whether passage-level retrieval helps.
+	`
+	CREATE TABLE IF NOT EXISTS chunk_embeddings (
+	  doc_id    TEXT NOT NULL,
+	  chunk_idx INTEGER NOT NULL,
+	  source    TEXT NOT NULL,
+	  model     TEXT NOT NULL,
+	  dim       INTEGER NOT NULL,
+	  vec       BLOB NOT NULL,
+	  PRIMARY KEY (doc_id, chunk_idx)
+	);
+	CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_source ON chunk_embeddings(source);
+	`,
 }

@@ -47,7 +47,7 @@ func TestConnectStatusDisconnect(t *testing.T) {
 	}
 	defer g.Close()
 
-	res, err := g.ConnectLocal(ctx, ConnectLocalOpts{Path: docs, Name: "notes"})
+	res, err := g.ConnectLocal(ctx, ConnectOpts{Path: docs, Name: "notes"})
 	if err != nil {
 		t.Fatalf("ConnectLocal: %v", err)
 	}

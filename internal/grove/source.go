@@ -62,7 +62,7 @@ func (g *Grove) Status(ctx context.Context) (*StatusReport, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := core.LoadConfigFile(g.configPath)
+	cfg, err := core.LoadMergedConfig(g.configPath)
 	if err != nil {
 		return nil, err
 	}
