@@ -4,87 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"grove/internal/core"
 	"grove/internal/grove"
 )
-
-// citationMarkerRe matches a bracketed run of comma/space-separated numbers so
-// that both the prompt's instructed form ([2][5]) and the common deviation
-// [1, 2] are captured. The inner numbers are split out by citedNums.
-var citationMarkerRe = regexp.MustCompile(`\[([\d,\s]+)\]`)
-
-// citedNums returns the citation numbers actually referenced in an answer via
-// [n] markers, including comma-joined forms like [1, 2].
-func citedNums(answer string) map[int]bool {
-	out := map[int]bool{}
-	for _, m := range citationMarkerRe.FindAllStringSubmatch(answer, -1) {
-		for _, f := range strings.FieldsFunc(m[1], func(r rune) bool { return r == ',' || r == ' ' }) {
-			if n, err := strconv.Atoi(f); err == nil {
-				out[n] = true
-			}
-		}
-	}
-	return out
-}
-
-// citationDisplay decides which retrieved citations to show. With a synthesized
-// answer, show only those the answer cites via [n]; if it cites none (e.g. the
-// answer says the topic isn't in the corpus), suppress the list entirely — the
-// retrieved candidates are just noise. In retrieve-only mode there is no answer
-// to cite from, so show every retrieved doc (that's the point of the mode).
-func citationDisplay(answer string, retrieveOnly, abstained bool) (cited map[int]bool, showAll, suppress bool) {
-	if retrieveOnly {
-		return nil, true, false
-	}
-	// On abstention the answer carries no [n] markers but explicitly promises a
-	// list of closest matches — show them all instead of suppressing.
-	if abstained {
-		return nil, true, false
-	}
-	cited = citedNums(answer)
-	if len(cited) == 0 {
-		return nil, false, true
-	}
-	return cited, false, false
-}
-
-// askStages is the set of retrieval stages a --mode selects. The CLI (the
-// transport adapter) owns this mode→stages mapping; query.Options stays
-// primitive booleans so the core library has no notion of "modes".
-type askStages struct {
-	fast      bool // no LLM tree descent (FTS + embeddings only)
-	decompose bool // split a multi-aspect question into sub-queries
-	rerank    bool // graded LLM reorder of fused candidates
-}
-
-// stagesForMode maps a mode name to its stages. Defaults derive from the
-// retrieval benchmark (documents/benchmark-findings.md):
-//   - fast: instant, model-free with --retrieve-only.
-//   - balanced (default): + decompose — big coverage win, model-robust (8b ok).
-//   - quality: + rerank — best ranking, but needs a STRONG model (8b is harmful).
-//   - deep: tree descent + decompose + rerank — explainable navigation path.
-func stagesForMode(mode string) (askStages, error) {
-	switch mode {
-	case "fast":
-		return askStages{fast: true}, nil
-	case "balanced":
-		return askStages{fast: true, decompose: true}, nil
-	case "quality":
-		return askStages{fast: true, decompose: true, rerank: true}, nil
-	case "deep":
-		return askStages{decompose: true, rerank: true}, nil
-	default:
-		return askStages{}, core.NewError(core.KindMisuse,
-			fmt.Sprintf("unknown mode %q", mode),
-			"use one of: fast, balanced, quality, deep")
-	}
-}
 
 func newAskCmd() *cobra.Command {
 	var model, source, mode string
@@ -108,21 +33,21 @@ func newAskCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
-			st, err := stagesForMode(mode)
+			st, err := grove.StagesForMode(mode)
 			if err != nil {
 				return err
 			}
 			// --fast is the spec's instant fallback: when set true it forces the
 			// model-free path, overriding any richer mode.
 			if cmd.Flags().Changed("fast") && fast {
-				st = askStages{fast: true}
+				st = grove.Stages{Fast: true}
 			}
 			// Granular stage flags override the mode when explicitly passed.
 			if cmd.Flags().Changed("decompose") {
-				st.decompose = decompose
+				st.Decompose = decompose
 			}
 			if cmd.Flags().Changed("rerank") {
-				st.rerank = rerank
+				st.Rerank = rerank
 			}
 
 			g, err := openGrove(ctx)
@@ -138,10 +63,10 @@ func newAskCmd() *cobra.Command {
 				MaxDepth:     maxDepth,
 				MaxTokens:    maxTokens,
 				RetrieveOnly: retrieveOnly,
-				Fast:         st.fast,
+				Fast:         st.Fast,
 				Prune:        prune,
-				Decompose:    st.decompose,
-				Rerank:       st.rerank,
+				Decompose:    st.Decompose,
+				Rerank:       st.Rerank,
 				Retrievers:   retrievers,
 				MaxDocs:      topK,
 				Correct:      correct,
@@ -185,7 +110,7 @@ func renderAskResult(cmd *cobra.Command, r *grove.AskResult, retrieveOnly bool) 
 		fmt.Fprintln(out, r.Answer)
 		fmt.Fprintln(out)
 	}
-	cited, showAll, suppress := citationDisplay(r.Answer, retrieveOnly, r.Abstained)
+	cited, showAll, suppress := grove.CitationDisplay(r.Answer, retrieveOnly, r.Abstained)
 	if len(r.Citations) > 0 && !suppress {
 		fmt.Fprintln(out, "Sources:")
 		for _, c := range r.Citations {

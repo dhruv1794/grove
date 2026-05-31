@@ -47,10 +47,10 @@ func (b *builder) crossLink(ctx context.Context) error {
 	return b.deps.Store.AddNodeSeeAlso(ctx, edges)
 }
 
-// leafNodeID is the stable id of the leaf node that holds a document. It must
-// match assembleTree's leaf id (tree id = source name; canonical path "doc:ID").
+// leafNodeID is the stable id of the leaf node that holds a document (tree id =
+// source name; canonical path "doc:ID").
 func leafNodeID(d *core.Document) string {
-	return nodeID(d.Source, "doc:"+d.ID)
+	return core.LeafNodeID(d.Source, d.ID)
 }
 
 // linkIndex resolves a raw link target to candidate document IDs. Targets are

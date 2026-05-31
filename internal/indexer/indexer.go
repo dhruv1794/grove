@@ -12,11 +12,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"grove/internal/compress"
 	"grove/internal/core"
 	"grove/internal/llm"
 	"grove/internal/store"
@@ -44,6 +46,11 @@ type Options struct {
 	NoGroup     bool   // skip LLM topic grouping of flat folders (mirror structure only)
 	Concurrency int    // max in-flight model calls; <= 1 builds sequentially
 
+	// Compress strips boilerplate from leaf document text before summarization
+	// (opt-in; None is the default no-op). It is part of the node cache key, so
+	// toggling it invalidates cached summaries.
+	Compress compress.Level
+
 	// OnProgress, if set, is called as a source's nodes are processed. It is
 	// invoked serially (never concurrently), so the callback needs no locking.
 	OnProgress func(Progress)
@@ -67,6 +74,8 @@ type Result struct {
 	CacheHits  int       `json:"cache_hits"`
 	CacheMiss  int       `json:"cache_miss"`
 	CrossLinks int       `json:"cross_links"`
+	Compressed int       `json:"compressed"`  // leaf docs whose text was compressed before summarization
+	TokensSaved int      `json:"tokens_saved"` // approx input tokens saved by compression (mdcompress estimate)
 	Tally      llm.Tally `json:"tally"`
 	Elapsed    string    `json:"elapsed"`
 }
@@ -286,7 +295,7 @@ func (b *builder) processChildren(ctx context.Context, n *bnode) error {
 func (b *builder) fillNode(ctx context.Context, n *bnode) error {
 	n.contentHash = hashNode(n)
 	n.payloadPath = core.PayloadPath(b.deps.Layout.Trees, n.contentHash,
-		cacheFilename(prompts.Node.Ver(), b.model))
+		cacheFilename(prompts.Node.Ver(), b.model, b.opts.Compress.CacheToken()))
 	b.tally(func(r *Result) { r.Nodes++ })
 
 	if !b.opts.Rebuild {
@@ -352,6 +361,15 @@ func (b *builder) nodeContent(ctx context.Context, n *bnode) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("load content for %s: %w", n.doc.ID, err)
 		}
+		// Strip boilerplate before truncation so the summary sees more signal per
+		// token. A compression error falls back to the original text (the build
+		// must not abort over one malformed doc); only meaningful savings count.
+		if out, stats, cerr := compress.Apply(b.opts.Compress, body); cerr != nil {
+			fmt.Fprintf(os.Stderr, "warning: compress %s: %v\n", n.doc.ID, cerr)
+		} else if stats.Saved() > 0 {
+			body = out
+			b.tally(func(r *Result) { r.Compressed++; r.TokensSaved += stats.Saved() })
+		}
 		title := n.doc.Title
 		if title == "" {
 			title = filepath.Base(n.doc.SourceRef)
@@ -416,11 +434,17 @@ func parseSummary(s string) (title, summary string) {
 	return "", strings.TrimSpace(s)
 }
 
-// cacheFilename is the per-node payload filename, encoding the prompt version
-// and build model so a node's cache entry is keyed by all three of
-// (content_hash, prompt_ver, build_model).
-func cacheFilename(promptVer, model string) string {
-	return slug(promptVer) + "__" + slug(model) + ".json"
+// cacheFilename is the per-node payload filename, encoding the prompt version,
+// build model, and (when set) the compression level so a node's cache entry is
+// keyed by all of (content_hash, prompt_ver, build_model, compress). The
+// compress suffix is omitted for the default (uncompressed) case so existing
+// caches stay valid.
+func cacheFilename(promptVer, model, compress string) string {
+	name := slug(promptVer) + "__" + slug(model)
+	if compress != "" {
+		name += "__c-" + slug(compress)
+	}
+	return name + ".json"
 }
 
 func slug(s string) string {

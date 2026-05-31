@@ -116,6 +116,11 @@ type Options struct {
 	CandidateWindow int   // fused candidates the rerank/prune stages consider; 0 → default 20
 	ChunkEmbed      bool  // semantic retriever searches passage (chunk) vectors → parent docs, vs whole-doc vectors
 	DebugScores     bool  // capture per-retriever ranked hits + raw scores into Result.RetrieverDebug
+
+	// OnToken, if set, is invoked with each synthesis token delta as it streams
+	// from the model (the answer is still returned whole in Result.Answer). Used
+	// by streaming adapters (web SSE); nil means a single non-streamed Complete.
+	OnToken func(string)
 }
 
 // candidateWindow is how many fused candidates the precision stages (rerank,
@@ -152,10 +157,13 @@ type Citation struct {
 	CrossLink bool   `json:"cross_link,omitempty"`
 }
 
-// TraceStep is one descent decision: a node entered and why.
+// TraceStep is one descent decision: a node entered and why. NodeID is the
+// stable node identity (core.Node.ID) so a graph view can match the exact node;
+// Node is its human title.
 type TraceStep struct {
 	Tree   string `json:"tree"`
 	Node   string `json:"node"`
+	NodeID string `json:"node_id,omitempty"`
 	Reason string `json:"reason"`
 }
 
@@ -181,6 +189,10 @@ type Result struct {
 	Trace     RetrievalTrace `json:"retrieval_trace"`
 	Cost      llm.Tally      `json:"cost"`
 	Abstained bool           `json:"abstained,omitempty"` // CRAG: best grader score below threshold
+	// RetrievalNodes are the stable node ids (core.Node.ID) that produced this
+	// answer — the descent/cross-link path nodes plus the cited leaves' nodes —
+	// so a graph view can light them up. Deduped, path nodes first.
+	RetrievalNodes []string `json:"retrieval_nodes,omitempty"`
 	// RetrieverDebug maps a base retriever ("fts","embed") to its ranked hits +
 	// raw scores, for diagnostics and router features. Set only under --debug-scores.
 	RetrieverDebug map[string][]RetrieverHit `json:"retriever_debug,omitempty"`
@@ -365,7 +377,7 @@ func (q *querier) expandCrossLinks(ctx context.Context, leaves []core.Node, docI
 					q.crossLinked = map[string]bool{}
 				}
 				q.crossLinked[did] = true
-				q.trace = append(q.trace, TraceStep{Tree: target.TreeID, Node: target.Title, Reason: "cross-link: " + ref.Reason})
+				q.trace = append(q.trace, TraceStep{Tree: target.TreeID, Node: target.Title, NodeID: target.ID, Reason: "cross-link: " + ref.Reason})
 				if added++; added >= maxCrossLinkDocs {
 					return docIDs
 				}
@@ -426,6 +438,7 @@ func (q *querier) assemble(ctx context.Context, docIDs []string) (*Result, error
 	for i, d := range docs {
 		res.Citations[i] = Citation{N: i + 1, DocID: d.ID, Title: d.Title, Source: d.Source, SourceRef: d.SourceRef, CrossLink: q.crossLinked[d.ID]}
 	}
+	res.RetrievalNodes = q.retrievalNodes(docs)
 	// CRAG abstention: when the graded candidates show neither a strong single
 	// match nor a quorum of moderate ones, no retrieved context adequately
 	// answers the question — abstain instead of synthesizing a confident answer.
@@ -442,6 +455,28 @@ func (q *querier) assemble(ctx context.Context, docIDs []string) (*Result, error
 	}
 	res.Cost = q.tally
 	return res, nil
+}
+
+// retrievalNodes is the set of node ids that produced the answer, for a graph
+// light-up: every node on the descent/cross-link path (from the trace) plus the
+// leaf node holding each returned document (tree id = source name). Deduped,
+// path nodes first.
+func (q *querier) retrievalNodes(docs []core.Document) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, st := range q.trace {
+		add(st.NodeID)
+	}
+	for _, d := range docs {
+		add(core.LeafNodeID(d.Source, d.ID))
+	}
+	return out
 }
 
 // selectTrees asks the model which trees likely hold the answer. A single
@@ -497,19 +532,39 @@ func (q *querier) synthesize(ctx context.Context, docs []core.Document) (string,
 		}
 		fmt.Fprintf(&sb, "\n[%d] %s (%s)\n%s\n", i+1, title, d.SourceRef, core.TruncateRunes(d.Content, maxExcerptChars))
 	}
-	resp, err := q.deps.LLM.Complete(ctx, llm.Request{
+	req := llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: prompts.Answer.Template},
 			{Role: llm.RoleUser, Content: sb.String()},
 		},
 		Temperature: synthesisTemp,
 		MaxTokens:   q.opts.MaxTokens,
+	}
+	if q.opts.OnToken == nil {
+		resp, err := q.deps.LLM.Complete(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		q.tally.Add(resp)
+		return strings.TrimSpace(resp.Content), nil
+	}
+	// Streaming path: forward each delta to the caller, accumulating the full
+	// answer. Providers vary in whether they also populate resp.Content, so fall
+	// back to the accumulated stream when it doesn't.
+	var streamed strings.Builder
+	resp, err := q.deps.LLM.Stream(ctx, req, func(chunk string) error {
+		streamed.WriteString(chunk)
+		q.opts.OnToken(chunk)
+		return nil
 	})
 	if err != nil {
 		return "", err
 	}
 	q.tally.Add(resp)
-	return strings.TrimSpace(resp.Content), nil
+	if s := strings.TrimSpace(resp.Content); s != "" {
+		return s, nil
+	}
+	return strings.TrimSpace(streamed.String()), nil
 }
 
 func filterTrees(trees []core.Tree, source string) []core.Tree {

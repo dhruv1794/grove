@@ -36,19 +36,35 @@ func (g *Grove) ListSources(ctx context.Context) ([]core.Source, error) {
 	return g.store.ListSources(ctx)
 }
 
+// Document returns one document — metadata plus full content — by its ID, read
+// from the content-addressed store (never an arbitrary filesystem path). It
+// returns a misuse error when no document has that ID. Behind /api/doc/:id.
+func (g *Grove) Document(ctx context.Context, id string) (*core.Document, error) {
+	docs, err := g.store.GetDocuments(ctx, []string{id})
+	if err != nil {
+		return nil, err
+	}
+	if len(docs) == 0 {
+		return nil, core.NewError(core.KindMisuse,
+			"no document with id "+id,
+			"use an id from a tree node or a citation")
+	}
+	return &docs[0], nil
+}
+
 // SourceStatus is one source's entry in a StatusReport.
 type SourceStatus struct {
-	Name       string
-	Type       string
-	DocCount   int
-	LastSyncAt time.Time
+	Name       string    `json:"name"`
+	Type       string    `json:"type"`
+	DocCount   int       `json:"doc_count"`
+	LastSyncAt time.Time `json:"last_sync_at"`
 }
 
 // StatusReport is the workspace snapshot returned by Status.
 type StatusReport struct {
-	Workspace string
-	Config    core.Config
-	Sources   []SourceStatus
+	Workspace string      `json:"workspace"`
+	Config    core.Config `json:"config"`
+	Sources   []SourceStatus `json:"sources"`
 }
 
 // Status returns a snapshot of the workspace: its config and every connected

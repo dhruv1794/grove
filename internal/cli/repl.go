@@ -411,7 +411,7 @@ func handleReplCommand(st *replState, sources []string, line string) (reply stri
 		if arg == "" {
 			return fmt.Sprintf("mode: %s\n", st.mode), false
 		}
-		if _, err := stagesForMode(arg); err != nil {
+		if _, err := grove.StagesForMode(arg); err != nil {
 			return fmt.Sprintf("unknown mode %q (fast, balanced, quality, deep)\n", arg), false
 		}
 		st.mode = arg
@@ -445,7 +445,7 @@ func handleReplCommand(st *replState, sources []string, line string) (reply stri
 
 func askInRepl(ctx context.Context, cmd *cobra.Command, g *grove.Grove, st *replState, q string) {
 	out := cmd.OutOrStdout()
-	stg, err := stagesForMode(st.mode)
+	stg, err := grove.StagesForMode(st.mode)
 	if err != nil {
 		fmt.Fprintf(out, "error: %v\n", err)
 		return
@@ -455,9 +455,9 @@ func askInRepl(ctx context.Context, cmd *cobra.Command, g *grove.Grove, st *repl
 		Model:        st.model,
 		Source:       st.source,
 		RetrieveOnly: st.retrieveOnly,
-		Fast:         stg.fast,
-		Decompose:    stg.decompose,
-		Rerank:       stg.rerank,
+		Fast:         stg.Fast,
+		Decompose:    stg.Decompose,
+		Rerank:       stg.Rerank,
 	})
 	if err != nil {
 		fmt.Fprintf(out, "error: %v\n", err)

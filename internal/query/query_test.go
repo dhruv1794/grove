@@ -147,6 +147,34 @@ func TestAsk(t *testing.T) {
 	}
 }
 
+func TestAskRetrievalNodes(t *testing.T) {
+	ctx := context.Background()
+	s, layout := newTestStore(t)
+	seedTree(t, s, layout)
+
+	res, err := Ask(ctx, Deps{Store: s, LLM: &fakeLLM{}}, "how does auth work?", Options{})
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	// Every descent trace step carries the stable node id it entered.
+	for i, st := range res.Trace.SearchPath {
+		if st.NodeID == "" {
+			t.Errorf("trace step %d (%q) has no node_id", i, st.Node)
+		}
+	}
+	// RetrievalNodes light-up set = the two reached leaves (descent path nodes
+	// here are themselves the leaves; cited-leaf ids dedupe against them).
+	want := map[string]bool{"notes:doc:d1": true, "notes:doc:d2": true}
+	if len(res.RetrievalNodes) != len(want) {
+		t.Fatalf("retrieval_nodes = %v, want %v", res.RetrievalNodes, want)
+	}
+	for _, id := range res.RetrievalNodes {
+		if !want[id] {
+			t.Errorf("unexpected retrieval node %q", id)
+		}
+	}
+}
+
 func TestAskRetrieveOnly(t *testing.T) {
 	ctx := context.Background()
 	s, layout := newTestStore(t)

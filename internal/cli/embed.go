@@ -46,7 +46,7 @@ func newEmbedProgress() (func(grove.EmbedProgress), func()) {
 }
 
 func newEmbedCmd() *cobra.Command {
-	var model, source string
+	var model, source, compress string
 	var maxChars int
 	var chunks bool
 
@@ -68,7 +68,7 @@ func newEmbedCmd() *cobra.Command {
 			onProgress, finishProgress := newEmbedProgress()
 			defer finishProgress()
 			res, err := g.Embed(ctx, grove.EmbedOpts{
-				Model: model, Source: source, MaxChars: maxChars, Chunks: chunks,
+				Model: model, Source: source, MaxChars: maxChars, Chunks: chunks, Compress: compress,
 				OnProgress: onProgress,
 			})
 			if err != nil {
@@ -87,6 +87,9 @@ func newEmbedCmd() *cobra.Command {
 			if res.Skipped > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "skipped %d document(s) too long for the embedder\n", res.Skipped)
 			}
+			if res.Compressed > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "compressed %d document(s), ~%d tokens saved\n", res.Compressed, res.TokensSaved)
+			}
 			return nil
 		},
 	}
@@ -94,5 +97,6 @@ func newEmbedCmd() *cobra.Command {
 	cmd.Flags().StringVar(&model, "model", "", "embedding model provider/name (default GROVE_EMBED_MODEL or ollama/bge-m3)")
 	cmd.Flags().StringVar(&source, "source", "", "embed only this source (default: all)")
 	cmd.Flags().IntVar(&maxChars, "max-chars", 0, "cap doc chars sent to the embedder (default 2000; lower for tight-context models like mxbai)")
+	cmd.Flags().StringVar(&compress, "compress", "", "compress doc text before embedding: none|safe|aggressive (default GROVE_EMBED_COMPRESS or none)")
 	return cmd
 }

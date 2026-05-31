@@ -30,6 +30,7 @@ type AskOpts struct {
 	CandidateWindow int   // fused candidates the rerank/prune stages consider; 0 → default 20
 	ChunkEmbed      bool  // semantic retriever searches passage vectors → parent docs (needs `grove embed --chunks`)
 	DebugScores     bool  // emit per-retriever ranked hits + raw scores in the result
+	OnToken         func(string) // if set, streams each synthesis token delta (web SSE); nil = non-streamed
 }
 
 // AskResult is a completed query.
@@ -116,6 +117,7 @@ func (g *Grove) Ask(ctx context.Context, opts AskOpts) (*AskResult, error) {
 		CandidateWindow: opts.CandidateWindow,
 		ChunkEmbed:      opts.ChunkEmbed,
 		DebugScores:     opts.DebugScores,
+		OnToken:         opts.OnToken,
 	})
 	if err != nil {
 		return nil, err

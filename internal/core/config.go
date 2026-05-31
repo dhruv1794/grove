@@ -24,6 +24,9 @@ type WorkspaceConfig struct {
 
 type ModelConfig struct {
 	Model string `toml:"model" json:"model"`
+	// Compress is the document-compression level applied before summarization.
+	// Read only for [build] (none|safe|aggressive); ignored for [query].
+	Compress string `toml:"compress,omitempty" json:"compress,omitempty"`
 }
 
 // GDriveConfig holds Google Drive connector credentials + defaults. Env vars
@@ -111,6 +114,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("GROVE_QUERY_MODEL"); v != "" {
 		cfg.Query.Model = v
+	}
+	if v := os.Getenv("GROVE_BUILD_COMPRESS"); v != "" {
+		cfg.Build.Compress = v
 	}
 	if v := os.Getenv("GROVE_GDRIVE_CLIENT_ID"); v != "" {
 		cfg.Gdrive.ClientID = v

@@ -780,7 +780,7 @@ func (m *tuiModel) submit() tea.Cmd {
 	// Green left accent bar + vertically-padded text (opencode-style); the border
 	// adds one column, so the content width is one less than the viewport.
 	m.appendLine(m.styles.userBlock.Width(m.vp.Width - 1).Render(val))
-	stg, err := stagesForMode(m.st.mode)
+	stg, err := grove.StagesForMode(m.st.mode)
 	if err != nil {
 		m.appendLine(m.styles.errln.Render("error: " + err.Error()))
 		m.refreshViewport()
@@ -793,16 +793,16 @@ func (m *tuiModel) submit() tea.Cmd {
 	return tea.Batch(m.spin.Tick, askCmd(m.ctx, m.g, m.st, stg, val))
 }
 
-func askCmd(ctx context.Context, g *grove.Grove, st *replState, stg askStages, q string) tea.Cmd {
+func askCmd(ctx context.Context, g *grove.Grove, st *replState, stg grove.Stages, q string) tea.Cmd {
 	return func() tea.Msg {
 		res, err := g.Ask(ctx, grove.AskOpts{
 			Query:        q,
 			Model:        st.model,
 			Source:       st.source,
 			RetrieveOnly: st.retrieveOnly,
-			Fast:         stg.fast,
-			Decompose:    stg.decompose,
-			Rerank:       stg.rerank,
+			Fast:         stg.Fast,
+			Decompose:    stg.Decompose,
+			Rerank:       stg.Rerank,
 		})
 		return askResultMsg{res: res, err: err}
 	}
@@ -899,7 +899,7 @@ func (m *tuiModel) renderResult(msg askResultMsg) {
 	if r.Answer != "" {
 		b.WriteString(r.Answer)
 	}
-	cited, showAll, suppress := citationDisplay(r.Answer, m.st.retrieveOnly, r.Abstained)
+	cited, showAll, suppress := grove.CitationDisplay(r.Answer, m.st.retrieveOnly, r.Abstained)
 	if len(r.Citations) > 0 && !suppress {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")

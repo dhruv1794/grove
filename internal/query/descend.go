@@ -94,7 +94,7 @@ func (q *querier) descend(ctx context.Context, lt *loadedTree, nodeID string, de
 		}
 		kid := kids[idx]
 		title, _ := q.summary(lt, kid)
-		q.trace = append(q.trace, TraceStep{Tree: lt.tree.Name, Node: title, Reason: reason})
+		q.trace = append(q.trace, TraceStep{Tree: lt.tree.Name, Node: title, NodeID: kid, Reason: reason})
 		if err := q.descend(ctx, lt, kid, depth+1, leaves); err != nil {
 			return err
 		}

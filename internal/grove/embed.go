@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"grove/internal/compress"
 	"grove/internal/core"
 	"grove/internal/llm"
 )
@@ -45,6 +46,12 @@ type EmbedOpts struct {
 	Source   string // embed only this source; "" embeds all
 	MaxChars int    // cap on doc chars sent to the embedder; 0 → default 2000 (lower for tight-context models like mxbai)
 	Chunks   bool   // also compute passage-level (semantic-chunk) vectors for --chunk-embed retrieval
+	// Compress sets the doc-compression level (none|safe|aggressive); resolved
+	// flag > GROVE_EMBED_COMPRESS. "" means none. Embed overwrites every vector
+	// per run, so re-running with a different level rebuilds consistently; the
+	// stored embedding-model identity is unchanged (the query stays uncompressed
+	// and compressed-doc vectors remain in the same model space).
+	Compress string
 
 	// OnProgress, if set, reports per-source doc-embed progress so an adapter
 	// (the CLI) can render a bar. Node and chunk embeds are not yet surfaced.
@@ -65,6 +72,8 @@ type EmbedResult struct {
 	Skipped        int `json:"skipped"`         // docs too long for the embedder even truncated
 	NodesEmbedded  int `json:"nodes_embedded"`  // internal tree-node summaries embedded (collapsed-tree retrieval)
 	ChunksEmbedded int `json:"chunks_embedded"` // passage vectors embedded (--chunks; semantic chunking)
+	Compressed     int `json:"compressed"`      // docs whose text was compressed before embedding
+	TokensSaved    int `json:"tokens_saved"`    // approx tokens saved by compression (mdcompress estimate)
 }
 
 const embedBatch = 32 // docs per embedding request
@@ -82,6 +91,15 @@ func (g *Grove) Embed(ctx context.Context, opts EmbedOpts) (*EmbedResult, error)
 		return nil, err
 	}
 	model := emb.Model().String()
+
+	compressStr := opts.Compress
+	if compressStr == "" {
+		compressStr = os.Getenv("GROVE_EMBED_COMPRESS")
+	}
+	level, err := compress.ParseLevel(compressStr)
+	if err != nil {
+		return nil, err
+	}
 
 	sources, err := g.store.ListSources(ctx)
 	if err != nil {
@@ -112,6 +130,7 @@ func (g *Grove) Embed(ctx context.Context, opts EmbedOpts) (*EmbedResult, error)
 				if err != nil {
 					return nil, err
 				}
+				body = g.compressForEmbed(level, d.ID, body, res)
 				texts[i] = d.Title + "\n\n" + core.TruncateRunes(body, maxChars)
 			}
 			vecs, err := emb.Embed(ctx, texts)
@@ -143,7 +162,7 @@ func (g *Grove) Embed(ctx context.Context, opts EmbedOpts) (*EmbedResult, error)
 			return nil, err
 		}
 		if opts.Chunks {
-			if err := g.embedChunks(ctx, emb, src.Name, model, maxChars, res); err != nil {
+			if err := g.embedChunks(ctx, emb, src.Name, model, maxChars, level, res); err != nil {
 				return nil, err
 			}
 		}
@@ -151,12 +170,33 @@ func (g *Grove) Embed(ctx context.Context, opts EmbedOpts) (*EmbedResult, error)
 	return res, nil
 }
 
+// compressForEmbed applies the embed compression level to a document body,
+// counting the savings into res when non-nil. A compression error falls back to
+// the original text with a stderr warning so embedding never aborts over one
+// bad doc; compression that doesn't reduce tokens keeps the original. res is nil
+// for the chunk pass so a doc isn't counted twice.
+func (g *Grove) compressForEmbed(level compress.Level, docID, body string, res *EmbedResult) string {
+	out, stats, err := compress.Apply(level, body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: compress %s: %v\n", docID, err)
+		return body
+	}
+	if stats.Saved() > 0 {
+		if res != nil {
+			res.Compressed++
+			res.TokensSaved += stats.Saved()
+		}
+		return out
+	}
+	return body
+}
+
 // embedChunks computes passage-level vectors: each document is split into
 // semantic chunks, each chunk embedded and stored against its parent doc, for
 // the --chunk-embed retriever. Replaces a doc's prior chunk vectors so a re-embed
 // reflects the current chunking. Idempotent. A passage that overflows the
 // embedder's context is skipped (counted via res.Skipped).
-func (g *Grove) embedChunks(ctx context.Context, emb *llm.Embedder, source, model string, maxChars int, res *EmbedResult) error {
+func (g *Grove) embedChunks(ctx context.Context, emb *llm.Embedder, source, model string, maxChars int, level compress.Level, res *EmbedResult) error {
 	metas, err := g.store.ListDocumentMetaBySource(ctx, source)
 	if err != nil {
 		return err
@@ -166,6 +206,7 @@ func (g *Grove) embedChunks(ctx context.Context, emb *llm.Embedder, source, mode
 		if err != nil {
 			return err
 		}
+		body = g.compressForEmbed(level, d.ID, body, nil) // counted in the whole-doc pass
 		chunks, err := semanticChunks(ctx, emb, d.ID, d.Title+"\n\n"+body)
 		if err != nil {
 			return fmt.Errorf("chunk doc %s: %w", d.ID, err)

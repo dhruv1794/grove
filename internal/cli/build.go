@@ -16,7 +16,7 @@ import (
 )
 
 func newBuildCmd() *cobra.Command {
-	var model, source string
+	var model, source, compress string
 	var rebuild, dryRun, noGroup bool
 	var concurrency int
 
@@ -43,6 +43,7 @@ func newBuildCmd() *cobra.Command {
 				DryRun:      dryRun,
 				NoGroup:     noGroup,
 				Concurrency: concurrency,
+				Compress:    compress,
 				OnProgress:  onProgress,
 			})
 			finishProgress()
@@ -63,6 +64,7 @@ func newBuildCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report the work without calling the model or writing")
 	cmd.Flags().BoolVar(&noGroup, "no-group", false, "mirror folder structure only; skip LLM topic grouping of flat folders")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 4, "max in-flight model calls (1 = sequential)")
+	cmd.Flags().StringVar(&compress, "compress", "", "compress doc text before summarization: none|safe|aggressive (default: config [build].compress)")
 	return cmd
 }
 
@@ -123,6 +125,9 @@ func renderBuildStats(out io.Writer, r *grove.BuildResult) {
 	}
 	if r.CrossLinks > 0 {
 		fmt.Fprintf(out, "links:   %s\n", plural(r.CrossLinks, "cross-link"))
+	}
+	if r.Compressed > 0 {
+		fmt.Fprintf(out, "compress: %s, ~%d input tokens saved\n", plural(r.Compressed, "doc"), r.TokensSaved)
 	}
 	fmt.Fprintf(out, "model:   %s\n", r.Model)
 	fmt.Fprintf(out, "llm:     %d calls · %d in / %d out tokens · %s\n",

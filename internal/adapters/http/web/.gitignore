@@ -1,0 +1,3 @@
+node_modules/
+*.tsbuildinfo
+# dist/ is intentionally committed — it is embedded into the grove binary.

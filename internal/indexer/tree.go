@@ -29,16 +29,14 @@ type bnode struct {
 	summary     string
 }
 
-// nodeID derives a stable logical node id from the tree id and a canonical
-// path within the tree. It is stable across rebuilds when the logical
-// structure is unchanged (per documents/03 §"Node identity rule").
-func nodeID(treeID, path string) string { return treeID + ":" + path }
+// nodeID/topicSep/topicNodeID delegate to core, the single owner of the
+// node-id grammar (see core.NodeID). Kept as local names so the build call
+// sites read unchanged.
+func nodeID(treeID, path string) string { return core.NodeID(treeID, path) }
 
-// topicSep joins a parent node id to a grouping-derived suffix in a topic
-// node's id (e.g. "notes:dir/topic-ab12cd34"); see indexer.applyGroups.
-const topicSep = "/topic-"
+const topicSep = core.TopicSep
 
-func topicNodeID(parentID, hash string) string { return parentID + topicSep + hash }
+func topicNodeID(parentID, hash string) string { return core.TopicNodeID(parentID, hash) }
 
 // assembleTree builds the in-memory tree for one source: an internal node per
 // directory segment of each document's native Hierarchy, with a leaf node per
