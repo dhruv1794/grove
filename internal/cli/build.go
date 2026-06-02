@@ -135,16 +135,7 @@ func renderBuildStats(out io.Writer, r *grove.BuildResult) {
 	fmt.Fprintf(out, "elapsed: %s\n", r.Elapsed)
 }
 
-func costStr(t llm.Tally) string {
-	if t.USD == 0 && !t.Estimated {
-		return "$0.00 (local model)"
-	}
-	s := fmt.Sprintf("$%.4f", t.USD)
-	if t.Estimated {
-		s += " (estimated)"
-	}
-	return s
-}
+func costStr(t llm.Tally) string { return t.USDString() }
 
 func plural(n int, noun string) string {
 	if n == 1 {

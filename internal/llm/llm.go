@@ -8,7 +8,10 @@
 // connectors or cli.
 package llm
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 type Role string
 
@@ -85,6 +88,20 @@ func (t *Tally) Add(r *Response) {
 	if r.Cost.Estimated {
 		t.Estimated = true
 	}
+}
+
+// USDString renders the tally's dollar cost for display. A genuine $0 (a local
+// model, exact) is labelled as such so a free run isn't mistaken for a missing
+// figure; an estimated figure is flagged per the cost-visibility discipline.
+func (t Tally) USDString() string {
+	if t.USD == 0 && !t.Estimated {
+		return "$0.00 (local model)"
+	}
+	s := fmt.Sprintf("$%.4f", t.USD)
+	if t.Estimated {
+		s += " (estimated)"
+	}
+	return s
 }
 
 // approxTokens approximates a token count from a character count

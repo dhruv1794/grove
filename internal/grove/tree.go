@@ -36,6 +36,7 @@ type ForestTree struct {
 	Source    string    `json:"source"`
 	DocCount  int       `json:"doc_count"`
 	NodeCount int       `json:"node_count"`
+	Summary   string    `json:"summary,omitempty"` // the root node's summary, when built
 	Root      *TreeNode `json:"root"`
 }
 
@@ -96,9 +97,16 @@ func (g *Grove) forestTree(ctx context.Context, t core.Tree, depth int) (*Forest
 	if root == nil {
 		return nil, nil
 	}
+	var summary string
+	for _, n := range nodes {
+		if n.ID == t.RootNodeID {
+			summary = summaryOf(n)
+			break
+		}
+	}
 	return &ForestTree{
 		ID: t.ID, Name: t.Name, Source: t.Source,
-		DocCount: t.DocCount, NodeCount: t.NodeCount, Root: root,
+		DocCount: t.DocCount, NodeCount: t.NodeCount, Summary: summary, Root: root,
 	}, nil
 }
 
